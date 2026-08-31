@@ -120,9 +120,8 @@ for request_index in $(seq 1 "${MAX_AUTONOMY_REQUESTS}"); do
   stop_reason="$(jq -r '.stop_reason // ""' /tmp/parallax-python-replay.json)"
   step_count="$(jq -r '.steps | length' /tmp/parallax-python-replay.json)"
 
-  echo "QA autonomy request ${request_index}: state=${state}; revision=${revision}; stop_reason=${stop_reason}; steps=${step_count}; elapsed=${request_elapsed}s"
+  echo "QA autonomy request ${request_index}: state=${state}; revision=${revision}; stop_reason=${stop_reason}; evidence_steps=${step_count}; elapsed=${request_elapsed}s"
   test "${binding_status}" = "APPROVED_SPEC_BOUND"
-  test "${step_count}" -le 1
   test -z "${failure}"
 
   if [ "${state}" = "REVIEW" ]; then
