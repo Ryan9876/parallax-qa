@@ -46,6 +46,10 @@ if [ -z "${project_id}" ]; then
   api --data-binary @/tmp/parallax-python-project-create.json \
     -X POST "${API_BASE}/v1/projects" >/tmp/parallax-python-project.json
   project_id="$(jq -r '.id' /tmp/parallax-python-project.json)"
+else
+  jq -n '{delivery_mode:"source-only"}' >/tmp/parallax-python-delivery.json
+  api --data-binary @/tmp/parallax-python-delivery.json \
+    -X PATCH "${API_BASE}/v1/projects/${project_id}/delivery" >/tmp/parallax-python-project.json
 fi
 test -n "${project_id}"
 
