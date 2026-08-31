@@ -2,12 +2,6 @@ name: Parallax Production Replay
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - .github/workflows/production-replay.yml
-      - scripts/ot_time_full_experience.sh
 
 permissions:
   contents: read
@@ -66,7 +60,7 @@ jobs:
           echo "::add-mask::${token}"
           echo "token=${token}" >> "${GITHUB_OUTPUT}"
 
-      - name: Run OT Time P2-V0.23.18 existing-file acceptance
+      - name: Run OT Time source-only full experience
         shell: bash
         env:
           OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
