@@ -1,0 +1,76 @@
+name: Parallax Production Replay
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/production-replay.yml
+      - scripts/python_full_experience.sh
+      - scripts/ot_time_full_experience.sh
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: parallax-production-replay
+  cancel-in-progress: false
+
+jobs:
+  python-source-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Request bounded Parallax QA OIDC token
+        id: oidc
+        shell: bash
+        run: |
+          set -euo pipefail
+          request_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=parallax%3A%2F%2Fqa-production"
+          token="$(curl --fail --silent --show-error \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${request_url}" | jq -r '.value')"
+          test -n "${token}"
+          test "${token}" != "null"
+          echo "::add-mask::${token}"
+          echo "token=${token}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run Python source-only full experience
+        shell: bash
+        env:
+          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
+          API_BASE: https://parallax-api-tan.vercel.app
+          REPOSITORY_REF: github:Ryan9876/Movies
+        run: bash scripts/python_full_experience.sh
+
+  ot-time-source-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Request bounded Parallax QA OIDC token
+        id: oidc
+        shell: bash
+        run: |
+          set -euo pipefail
+          request_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=parallax%3A%2F%2Fqa-production"
+          token="$(curl --fail --silent --show-error \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${request_url}" | jq -r '.value')"
+          test -n "${token}"
+          test "${token}" != "null"
+          echo "::add-mask::${token}"
+          echo "token=${token}" >> "${GITHUB_OUTPUT}"
+
+      - name: Run OT Time source-only full experience
+        shell: bash
+        env:
+          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
+          API_BASE: https://parallax-api-tan.vercel.app
+          REPOSITORY_REF: github:Ryan9876/ot-time
+        run: bash scripts/ot_time_full_experience.sh
