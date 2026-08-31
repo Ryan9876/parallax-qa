@@ -59,7 +59,8 @@ api --data-binary @/tmp/parallax-ot-conversation-create.json \
   -X POST "${API_BASE}/v1/conversations" >/tmp/parallax-ot-conversation.json
 conversation_id="$(jq -r '.id' /tmp/parallax-ot-conversation.json)"
 
-objective='This is an approved QA-only source-only production acceptance against Ryan9876/ot-time. Make one minimal, reversible, non-functional documentation addition named PARALLAX_QA.md. Do not change existing application behavior, delete or rename existing files, publish source, or deploy an application.'
+marker='Parallax QA exercises existing-file patch validation only; this source-only change is not published.'
+objective="This is an approved QA-only source-only production acceptance against Ryan9876/ot-time for P2-V0.23.18. Update only the existing README.md file. Under the existing '## Status' heading, add exactly this sentence as its own paragraph: '${marker}' Do not create new files, change application behavior, delete or rename files, publish source, or deploy an application."
 jq -n --arg content "${objective}" '{role:"user",content:$content}' >/tmp/parallax-ot-message.json
 api --data-binary @/tmp/parallax-ot-message.json \
   -X POST "${API_BASE}/v1/conversations/${conversation_id}/messages" >/tmp/parallax-ot-message-response.json
@@ -83,6 +84,8 @@ run_id="$(jq -r '.id' /tmp/parallax-ot-run-before.json)"
 revision="$(jq -r '.revision' /tmp/parallax-ot-run-before.json)"
 test "$(jq -r '.state' /tmp/parallax-ot-run-before.json)" = "PLAN"
 
+echo "P2-V0.23.18 fixture: project=${project_id}; run=${run_id}; before_state=PLAN; revision=${revision}"
+
 operation_key="qa-ot-time-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}"
 jq -n --arg operation_key "${operation_key}" --argjson expected_revision "${revision}" \
   '{operation_key:$operation_key,expected_revision:$expected_revision}' >/tmp/parallax-ot-autonomous.json
@@ -99,25 +102,37 @@ if [ "${autonomous_status}" != "200" ]; then
   exit 1
 fi
 
+jq '{stop_reason,run:{id:.run.id,state:.run.state,revision:.run.revision,last_failure_code:.run.last_failure_code},steps}' /tmp/parallax-ot-replay.json
+
 api "${API_BASE}/v1/engineering-runs/${run_id}" >/tmp/parallax-ot-run-after.json
 state="$(jq -r '.state' /tmp/parallax-ot-run-after.json)"
 failure="$(jq -r '.last_failure_code // ""' /tmp/parallax-ot-run-after.json)"
+after_revision="$(jq -r '.revision' /tmp/parallax-ot-run-after.json)"
+if [ "${after_revision}" -le "${revision}" ]; then
+  echo "P2-V0.23.18 fixture did not durably advance: before=${revision}, after=${after_revision}, state=${state}, failure=${failure:-none}" >&2
+  exit 1
+fi
 test "${state}" = "REVIEW"
 test -z "${failure}"
 
 api "${API_BASE}/v1/projects/${project_id}/engineering-runs/${run_id}/source-download" -o /tmp/parallax-ot-source.zip
-python - <<'PY'
+MARKER="${marker}" python - <<'PY'
+import os
 from pathlib import Path
 from zipfile import ZipFile, is_zipfile
 
 archive = Path('/tmp/parallax-ot-source.zip')
+marker = os.environ['MARKER']
 assert archive.is_file() and archive.stat().st_size > 0
 assert is_zipfile(archive)
 with ZipFile(archive) as zf:
     names = zf.namelist()
-    assert 'PARALLAX_QA.md' in names
+    assert 'README.md' in names
+    assert 'PARALLAX_QA.md' not in names
     assert all(not name.startswith('/') and '..' not in name.split('/') for name in names)
-print(f'OT Time full experience accepted: entries={len(names)}, bytes={archive.stat().st_size}')
+    readme = zf.read('README.md').decode('utf-8')
+    assert marker in readme
+print(f'P2-V0.23.18 existing-file source accepted: entries={len(names)}, bytes={archive.stat().st_size}')
 PY
 
-echo "OT Time full-experience acceptance completed: project=${project_id}; run=${run_id}; state=${state}; source_publication=false; app_deployment=false"
+echo "P2-V0.23.18 existing-file acceptance completed: project=${project_id}; run=${run_id}; state=${state}; revision=${after_revision}; source_publication=false; app_deployment=false"
