@@ -1,0 +1,33 @@
+name: QA Harness CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/**
+      - scripts/**
+      - README.md
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/python_full_experience.sh
+          bash -n scripts/ot_time_full_experience.sh
+      - name: Static security assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -F 'parallax://qa-production' README.md >/dev/null
+          ! grep -R -E 'ACTIONS_ID_TOKEN_REQUEST_TOKEN=|OIDC_TOKEN=' . --exclude-dir=.git >/dev/null
+          ! grep -R -E 'ghp_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+' . --exclude-dir=.git >/dev/null
