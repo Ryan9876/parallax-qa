@@ -2,11 +2,6 @@ name: Parallax Production Replay
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - .github/workflows/production-replay.yml
 
 permissions:
   contents: read
@@ -18,7 +13,6 @@ concurrency:
 
 jobs:
   python-source-only:
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -47,7 +41,6 @@ jobs:
         run: bash scripts/python_full_experience.sh
 
   ot-time-source-only:
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -74,52 +67,3 @@ jobs:
           API_BASE: https://parallax-api-tan.vercel.app
           REPOSITORY_REF: github:Ryan9876/ot-time
         run: bash scripts/ot_time_full_experience.sh
-
-  w9-s1-greenfield:
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Check out exact deployed Parallax source
-        uses: actions/checkout@v4
-        with:
-          repository: Ryan9876/parallax
-          ref: bfc2373d690113a592a52ca8a12fc6b5343d481d
-          path: parallax-app
-
-      - name: Request bounded Parallax QA OIDC token
-        id: oidc
-        shell: bash
-        run: |
-          set -euo pipefail
-          request_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=parallax%3A%2F%2Fqa-production"
-          token="$(curl --fail --silent --show-error \
-            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${request_url}" | jq -r '.value')"
-          test -n "${token}"
-          test "${token}" != "null"
-          echo "::add-mask::${token}"
-          echo "token=${token}" >> "${GITHUB_OUTPUT}"
-
-      - name: Run frozen Decision Ledger benchmark with Preview delivery enabled
-        shell: bash
-        env:
-          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
-          API_BASE: https://parallax-api-tan.vercel.app
-          REPOSITORY_REF: github:Ryan9876/parallax-qa1
-        run: |
-          set -euo pipefail
-          cd parallax-app
-          refs="$(git ls-remote https://github.com/Ryan9876/parallax-qa1.git)"
-          test -z "${refs}"
-          python - <<'PY'
-          from pathlib import Path
-          path = Path('scripts/w9_s1_reference_trial.sh')
-          text = path.read_text(encoding='utf-8')
-          old = "'{name:\"Decision Ledger W9-S1 Reference\",slug:$slug,repository_ref:$repository_ref}'"
-          new = "'{name:\"Decision Ledger W9-S1 Reference\",slug:$slug,repository_ref:$repository_ref,delivery_mode:\"vercel-preview\"}'"
-          if text.count(old) != 1:
-              raise SystemExit('Expected exactly one Project-create benchmark harness boundary')
-          path.write_text(text.replace(old, new, 1), encoding='utf-8')
-          PY
-          bash scripts/w9_s1_reference_trial.sh
