@@ -6,6 +6,8 @@ set -euo pipefail
 
 REPOSITORY_REF="${REPOSITORY_REF:-github:Ryan9876/ot-time}"
 COOKIE_JAR="${COOKIE_JAR:-/tmp/parallax-ot-time.cookies}"
+MAX_AUTONOMY_REQUESTS=8
+AUTONOMY_REQUEST_TIMEOUT_SECONDS=240
 
 api() {
   curl --fail-with-body --silent --show-error \
@@ -81,24 +83,61 @@ api --data-binary @/tmp/parallax-ot-activate.json \
   -X POST "${API_BASE}/v1/engineering-runs/activate" >/tmp/parallax-ot-run-before.json
 run_id="$(jq -r '.id' /tmp/parallax-ot-run-before.json)"
 revision="$(jq -r '.revision' /tmp/parallax-ot-run-before.json)"
-test "$(jq -r '.state' /tmp/parallax-ot-run-before.json)" = "PLAN"
+state="$(jq -r '.state' /tmp/parallax-ot-run-before.json)"
+binding_status="$(jq -r '.binding_status // ""' /tmp/parallax-ot-run-before.json)"
+test "${state}" = "PLAN"
+test "${binding_status}" = "APPROVED_SPEC_BOUND"
 
-operation_key="qa-ot-time-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}"
-jq -n --arg operation_key "${operation_key}" --argjson expected_revision "${revision}" \
-  '{operation_key:$operation_key,expected_revision:$expected_revision}' >/tmp/parallax-ot-autonomous.json
-autonomous_status="$(curl --silent --show-error --max-time 900 \
-  --output /tmp/parallax-ot-replay.json \
-  --write-out '%{http_code}' \
-  --cookie "${COOKIE_JAR}" \
-  -H "X-Parallax-Session: 1" \
-  -H "Content-Type: application/json" \
-  --data-binary @/tmp/parallax-ot-autonomous.json \
-  -X POST "${API_BASE}/v1/engineering-runs/${run_id}/autonomous")"
-if [ "${autonomous_status}" != "200" ]; then
-  jq -c '.' /tmp/parallax-ot-replay.json
-  exit 1
-fi
+completed_requests=0
+failure=""
+for request_index in $(seq 1 "${MAX_AUTONOMY_REQUESTS}"); do
+  operation_key="autonomous-auto-${run_id}-${revision}"
+  jq -n --arg operation_key "${operation_key}" --argjson expected_revision "${revision}" \
+    '{operation_key:$operation_key,expected_revision:$expected_revision}' >/tmp/parallax-ot-autonomous.json
 
+  request_started_at="$(date +%s)"
+  autonomous_status="$(curl --silent --show-error --max-time "${AUTONOMY_REQUEST_TIMEOUT_SECONDS}" \
+    --output /tmp/parallax-ot-replay.json \
+    --write-out '%{http_code}' \
+    --cookie "${COOKIE_JAR}" \
+    -H "X-Parallax-Session: 1" \
+    -H "Content-Type: application/json" \
+    --data-binary @/tmp/parallax-ot-autonomous.json \
+    -X POST "${API_BASE}/v1/engineering-runs/${run_id}/autonomous")"
+  request_elapsed="$(( $(date +%s) - request_started_at ))"
+
+  if [ "${autonomous_status}" != "200" ]; then
+    echo "Autonomy request failed: request=${request_index}; status=${autonomous_status}; elapsed=${request_elapsed}s"
+    jq -c '.' /tmp/parallax-ot-replay.json || true
+    exit 1
+  fi
+
+  completed_requests="${request_index}"
+  state="$(jq -r '.run.state' /tmp/parallax-ot-replay.json)"
+  revision="$(jq -r '.run.revision' /tmp/parallax-ot-replay.json)"
+  binding_status="$(jq -r '.run.binding_status // ""' /tmp/parallax-ot-replay.json)"
+  failure="$(jq -r '.run.last_failure_code // ""' /tmp/parallax-ot-replay.json)"
+  stop_reason="$(jq -r '.stop_reason // ""' /tmp/parallax-ot-replay.json)"
+  step_count="$(jq -r '.steps | length' /tmp/parallax-ot-replay.json)"
+
+  echo "QA autonomy request ${request_index}: state=${state}; revision=${revision}; stop_reason=${stop_reason}; steps=${step_count}; elapsed=${request_elapsed}s"
+  test "${binding_status}" = "APPROVED_SPEC_BOUND"
+  test "${step_count}" -le 1
+  test -z "${failure}"
+
+  if [ "${state}" = "REVIEW" ]; then
+    test "${stop_reason}" = "REVIEW_REQUIRED"
+    break
+  fi
+
+  test "${stop_reason}" = "MAX_STEPS_REACHED"
+  case "${state}" in
+    PLAN|IMPLEMENT|BUILD|TEST|VERIFY) ;;
+    *) echo "Unexpected autonomous continuation state: ${state}"; exit 1 ;;
+  esac
+done
+
+test "${completed_requests}" -gt 1
 api "${API_BASE}/v1/engineering-runs/${run_id}" >/tmp/parallax-ot-run-after.json
 state="$(jq -r '.state' /tmp/parallax-ot-run-after.json)"
 failure="$(jq -r '.last_failure_code // ""' /tmp/parallax-ot-run-after.json)"
@@ -120,4 +159,4 @@ with ZipFile(archive) as zf:
 print(f'OT Time full experience accepted: entries={len(names)}, bytes={archive.stat().st_size}')
 PY
 
-echo "OT Time full-experience acceptance completed: project=${project_id}; run=${run_id}; state=${state}; source_publication=false; app_deployment=false"
+echo "OT Time full-experience acceptance completed: project=${project_id}; run=${run_id}; requests=${completed_requests}; state=${state}; source_publication=false; app_deployment=false"
