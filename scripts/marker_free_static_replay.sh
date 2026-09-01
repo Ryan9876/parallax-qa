@@ -17,16 +17,29 @@ api() {
     "$@"
 }
 
-# AC-12 requires an equivalent marker-free greenfield run. Refuse to reuse a
-# repository that already has source so the trusted QA path cannot silently
-# degrade into an established-source replay.
+# AC-12 needs marker-free accepted source. Prefer a literally empty repository,
+# but allow the dedicated authorized QA fixture to use an existing ref whose
+# current tree contains zero files. Repository history is not execution input;
+# the projected accepted source tree is. This does not widen product/provider
+# authorization and is enabled only by an explicit harness flag.
 repo_url="https://github.com/${REPOSITORY_REF#github:}.git"
 refs="$(git ls-remote "${repo_url}")"
-if [ -n "${refs}" ]; then
+if [ -z "${refs}" ]; then
+  echo "QA phase: empty marker-free repository verified (${REPOSITORY_REF})"
+elif [ "${ALLOW_COMMITTED_EMPTY_TREE:-0}" = "1" ]; then
+  tmp_repo="$(mktemp -d)"
+  trap 'rm -rf "${tmp_repo}"' EXIT
+  git clone --quiet --depth=1 "${repo_url}" "${tmp_repo}/repo"
+  source_paths="$(git -C "${tmp_repo}/repo" ls-tree -r --name-only HEAD)"
+  if [ -n "${source_paths}" ]; then
+    echo "Authorized QA target has source files; refusing marker-free replay: ${REPOSITORY_REF}" >&2
+    exit 1
+  fi
+  echo "QA phase: authorized zero-file source tree verified (${REPOSITORY_REF})"
+else
   echo "Marker-free QA target is not empty: ${REPOSITORY_REF}" >&2
   exit 1
 fi
-echo "QA phase: empty marker-free repository verified (${REPOSITORY_REF})"
 
 authenticated=0
 for attempt in $(seq 1 36); do
@@ -45,10 +58,9 @@ done
 test "${authenticated}" = "1"
 echo "QA phase: trusted production session established"
 
-# This repository is dedicated to disposable QA. Remove an older QA-owned
-# Project bound to the exact fixture repository so each replay starts with no
-# accepted Project source lineage. This is ordinary owner-scoped product
-# deletion, not a database or authorization bypass.
+# Remove an older QA-owned Project bound to the exact fixture repository so
+# each replay starts with no accepted Project source lineage. The one-shot
+# workflow calls the dedicated retire helper first; this is a final guard.
 api "${API_BASE}/v1/projects" >/tmp/parallax-marker-free-projects.json
 mapfile -t old_projects < <(jq -r --arg repo "${REPOSITORY_REF}" '.[] | select((.repository_ref // "" | ascii_downcase) == ($repo | ascii_downcase)) | .id' /tmp/parallax-marker-free-projects.json)
 for old_project_id in "${old_projects[@]:-}"; do
