@@ -2,6 +2,8 @@ name: Parallax Production Replay
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -13,6 +15,7 @@ concurrency:
 
 jobs:
   python-source-only:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -41,6 +44,7 @@ jobs:
         run: bash scripts/python_full_experience.sh
 
   ot-time-source-only:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -69,6 +73,7 @@ jobs:
         run: bash scripts/ot_time_full_experience.sh
 
   marker-free-static:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -88,12 +93,12 @@ jobs:
           echo "::add-mask::${token}"
           echo "token=${token}" >> "${GITHUB_OUTPUT}"
 
-      - name: Retire prior marker-free QA fixture state
+      - name: Retire prior QA fixture state
         shell: bash
         env:
           OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
           API_BASE: https://parallax-api-tan.vercel.app
-          REPOSITORY_REF: github:Ryan9876/parallax-qa1
+          REPOSITORY_REF: github:Ryan9876/Movies
         run: bash scripts/retire_marker_free_project.sh
 
       - name: Run marker-free static P2-V0.23.32 replay
@@ -101,5 +106,6 @@ jobs:
         env:
           OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
           API_BASE: https://parallax-api-tan.vercel.app
-          REPOSITORY_REF: github:Ryan9876/parallax-qa1
+          REPOSITORY_REF: github:Ryan9876/Movies
+          ALLOW_COMMITTED_EMPTY_TREE: '1'
         run: bash scripts/marker_free_static_replay.sh
