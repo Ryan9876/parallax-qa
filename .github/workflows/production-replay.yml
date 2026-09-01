@@ -107,5 +107,5 @@ jobs:
           OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
           API_BASE: https://parallax-api-tan.vercel.app
           REPOSITORY_REF: github:Ryan9876/Movies
-          ALLOW_COMMITTED_EMPTY_TREE: '1'
+          ALLOW_MARKER_FREE_README_ONLY: '1'
         run: bash scripts/marker_free_static_replay.sh
