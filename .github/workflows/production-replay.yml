@@ -93,6 +93,14 @@ jobs:
           echo "::add-mask::${token}"
           echo "token=${token}" >> "${GITHUB_OUTPUT}"
 
+      - name: Retire prior marker-free QA fixture state
+        shell: bash
+        env:
+          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
+          API_BASE: https://parallax-api-tan.vercel.app
+          REPOSITORY_REF: github:Ryan9876/parallax-qa1
+        run: bash scripts/retire_marker_free_project.sh
+
       - name: Run marker-free static P2-V0.23.32 replay
         shell: bash
         env:
