@@ -17,7 +17,7 @@ api() {
     "$@"
 }
 
-# AC-12 needs marker-free accepted source. A literally empty repository is the
+# AC-11 needs marker-free accepted source. A literally empty repository is the
 # canonical greenfield case. The authorized QA fixture may instead contain only
 # README.md: that is deliberately non-executable source and binds the same
 # static-web-v1 contract because it has no Python/.NET/Node execution marker.
@@ -86,7 +86,7 @@ project_slug="qa-marker-free-${GITHUB_RUN_ID:-fixture}-${GITHUB_RUN_ATTEMPT:-1}"
 jq -n \
   --arg name "QA Marker-Free Static" \
   --arg slug "${project_slug}" \
-  --arg description "QA-only marker-free source-only P2-V0.23.32 acceptance fixture; no source publication or application deployment." \
+  --arg description "QA-only marker-free source-only P2-V0.23.33 acceptance fixture; no source publication or application deployment." \
   --arg repository_ref "${REPOSITORY_REF}" \
   '{name:$name,slug:$slug,description:$description,repository_ref:$repository_ref,delivery_mode:"source-only"}' \
   >/tmp/parallax-marker-free-project-create.json
@@ -130,7 +130,7 @@ echo "QA Engineering Run: ${run_id}"
 
 completed_requests=0
 for request_index in $(seq 1 "${MAX_AUTONOMY_REQUESTS}"); do
-  operation_key="p2332-marker-free-${run_id}-${revision}"
+  operation_key="p2333-marker-free-${run_id}-${revision}"
   jq -n --arg operation_key "${operation_key}" --argjson expected_revision "${revision}" \
     '{operation_key:$operation_key,expected_revision:$expected_revision}' >/tmp/parallax-marker-free-autonomous.json
 
