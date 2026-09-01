@@ -101,7 +101,7 @@ jobs:
           REPOSITORY_REF: github:Ryan9876/Movies
         run: bash scripts/retire_marker_free_project.sh
 
-      - name: Run marker-free static P2-V0.23.32 replay
+      - name: Run marker-free static P2-V0.23.33 replay
         shell: bash
         env:
           OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
