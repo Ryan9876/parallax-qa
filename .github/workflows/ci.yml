@@ -24,6 +24,8 @@ jobs:
           set -euo pipefail
           bash -n scripts/python_full_experience.sh
           bash -n scripts/ot_time_full_experience.sh
+          bash -n scripts/retire_marker_free_project.sh
+          bash -n scripts/marker_free_static_replay.sh
       - name: Static security assertions
         shell: bash
         run: |
