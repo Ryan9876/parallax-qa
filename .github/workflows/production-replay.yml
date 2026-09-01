@@ -2,6 +2,8 @@ name: Parallax Production Replay
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -12,6 +14,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  existing-run-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Request bounded Parallax QA OIDC token
+        id: oidc
+        shell: bash
+        run: |
+          set -euo pipefail
+          request_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=parallax%3A%2F%2Fqa-production"
+          token="$(curl --fail --silent --show-error \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${request_url}" | jq -r '.value')"
+          test -n "${token}"
+          test "${token}" != "null"
+          echo "::add-mask::${token}"
+          echo "token=${token}" >> "${GITHUB_OUTPUT}"
+
+      - name: Probe exact existing Engineering Run
+        shell: bash
+        env:
+          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
+          API_BASE: https://parallax-api-tan.vercel.app
+          RUN_ID: 3a1ba66a-5649-42b6-81ee-91684fe06bbc
+        run: bash scripts/probe_existing_run_acceptance.sh
+
   python-source-only:
     runs-on: ubuntu-latest
     timeout-minutes: 30
