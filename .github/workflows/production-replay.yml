@@ -14,71 +14,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  python-source-only:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Request bounded Parallax QA OIDC token
-        id: oidc
-        shell: bash
-        run: |
-          set -euo pipefail
-          request_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=parallax%3A%2F%2Fqa-production"
-          token="$(curl --fail --silent --show-error \
-            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${request_url}" | jq -r '.value')"
-          test -n "${token}"
-          test "${token}" != "null"
-          echo "::add-mask::${token}"
-          echo "token=${token}" >> "${GITHUB_OUTPUT}"
-
-      - name: Run Python source-only full experience
-        shell: bash
-        env:
-          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
-          API_BASE: https://parallax-api-tan.vercel.app
-          REPOSITORY_REF: github:Ryan9876/Movies
-        run: bash scripts/python_full_experience.sh
-
-  ot-time-source-only:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Request bounded Parallax QA OIDC token
-        id: oidc
-        shell: bash
-        run: |
-          set -euo pipefail
-          request_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=parallax%3A%2F%2Fqa-production"
-          token="$(curl --fail --silent --show-error \
-            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${request_url}" | jq -r '.value')"
-          test -n "${token}"
-          test "${token}" != "null"
-          echo "::add-mask::${token}"
-          echo "token=${token}" >> "${GITHUB_OUTPUT}"
-
-      - name: Run OT Time source-only full experience
-        shell: bash
-        env:
-          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
-          API_BASE: https://parallax-api-tan.vercel.app
-          REPOSITORY_REF: github:Ryan9876/ot-time
-        run: bash scripts/ot_time_full_experience.sh
-
-  marker-free-static:
+  w9-s1-greenfield-continue:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-
       - name: Request bounded Parallax QA OIDC token
         id: oidc
         shell: bash
@@ -93,19 +33,99 @@ jobs:
           echo "::add-mask::${token}"
           echo "token=${token}" >> "${GITHUB_OUTPUT}"
 
-      - name: Retire prior QA fixture state
+      - name: Continue exact W9-S1 Engineering Run
         shell: bash
         env:
           OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
           API_BASE: https://parallax-api-tan.vercel.app
-          REPOSITORY_REF: github:Ryan9876/Movies
-        run: bash scripts/retire_marker_free_project.sh
+          REPOSITORY_REF: github:Ryan9876/parallax-qa1
+          PROJECT_ID: 0e20392b-debc-4a86-80e8-dd87c57cf510
+          RUN_ID: f0ccbc41-b082-4dd2-a5b6-a68963628bb9
+        run: |
+          set -euo pipefail
+          COOKIE_JAR=/tmp/parallax-w9-s1.cookies
+          MAX_AUTONOMY_REQUESTS=8
 
-      - name: Run marker-free static P2-V0.23.33 replay
-        shell: bash
-        env:
-          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
-          API_BASE: https://parallax-api-tan.vercel.app
-          REPOSITORY_REF: github:Ryan9876/Movies
-          ALLOW_MARKER_FREE_README_ONLY: '1'
-        run: bash scripts/marker_free_static_replay.sh
+          api() {
+            curl --fail-with-body --silent --show-error \
+              --cookie "${COOKIE_JAR}" \
+              -H "X-Parallax-Session: 1" \
+              -H "Content-Type: application/json" \
+              "$@"
+          }
+
+          refs="$(git ls-remote "https://github.com/${REPOSITORY_REF#github:}.git")"
+          test -z "${refs}"
+          echo "W9-S1 target remains empty before continuation: ${REPOSITORY_REF}"
+
+          status="$(curl --silent --show-error \
+            --output /tmp/w9-session.json \
+            --write-out '%{http_code}' \
+            --cookie-jar "${COOKIE_JAR}" \
+            -H "Authorization: Bearer ${OIDC_TOKEN}" \
+            -X POST "${API_BASE}/v1/session/qa-automation" || true)"
+          test "${status}" = "200"
+          jq -e '.authenticated == true' /tmp/w9-session.json >/dev/null
+
+          api "${API_BASE}/v1/engineering-runs/${RUN_ID}" >/tmp/w9-run.json
+          test "$(jq -r '.project_id' /tmp/w9-run.json)" = "${PROJECT_ID}"
+          state="$(jq -r '.state' /tmp/w9-run.json)"
+          revision="$(jq -r '.revision' /tmp/w9-run.json)"
+          failure="$(jq -r '.last_failure_code // ""' /tmp/w9-run.json)"
+          test -z "${failure}"
+          echo "W9-S1 starting continuation: state=${state}; revision=${revision}"
+
+          completed_requests=0
+          for request_index in $(seq 1 "${MAX_AUTONOMY_REQUESTS}"); do
+            case "${state}" in
+              REVIEW) break ;;
+              PLAN|IMPLEMENT|BUILD|TEST|VERIFY) ;;
+              *) echo "Unexpected W9-S1 continuation state before request: ${state}" >&2; exit 1 ;;
+            esac
+
+            operation_key="w9-s1-continue-${RUN_ID}-${revision}"
+            jq -n --arg operation_key "${operation_key}" --argjson expected_revision "${revision}" \
+              '{operation_key:$operation_key,expected_revision:$expected_revision}' >/tmp/w9-autonomous.json
+
+            autonomous_status="$(curl --silent --show-error --max-time 900 \
+              --output /tmp/w9-autonomous-result.json \
+              --write-out '%{http_code}' \
+              --cookie "${COOKIE_JAR}" \
+              -H "X-Parallax-Session: 1" \
+              -H "Content-Type: application/json" \
+              --data-binary @/tmp/w9-autonomous.json \
+              -X POST "${API_BASE}/v1/engineering-runs/${RUN_ID}/autonomous" || true)"
+
+            if [ "${autonomous_status}" != "200" ]; then
+              echo "W9-S1 autonomy HTTP failure: request=${request_index}; status=${autonomous_status}" >&2
+              cat /tmp/w9-autonomous-result.json >&2 || true
+              exit 1
+            fi
+
+            completed_requests="${request_index}"
+            state="$(jq -r '.run.state' /tmp/w9-autonomous-result.json)"
+            revision="$(jq -r '.run.revision' /tmp/w9-autonomous-result.json)"
+            failure="$(jq -r '.run.last_failure_code // ""' /tmp/w9-autonomous-result.json)"
+            stop_reason="$(jq -r '.stop_reason // ""' /tmp/w9-autonomous-result.json)"
+            echo "W9-S1 request ${request_index}: state=${state}; revision=${revision}; stop_reason=${stop_reason}; failure=${failure:-none}"
+
+            if [ -n "${failure}" ]; then
+              exit 1
+            fi
+            if [ "${state}" = "REVIEW" ]; then
+              break
+            fi
+          done
+
+          api "${API_BASE}/v1/engineering-runs/${RUN_ID}" >/tmp/w9-run-final.json
+          state="$(jq -r '.state' /tmp/w9-run-final.json)"
+          failure="$(jq -r '.last_failure_code // ""' /tmp/w9-run-final.json)"
+          echo "W9-S1 final: run=${RUN_ID}; requests=${completed_requests}; state=${state}; failure=${failure:-none}"
+          jq -c '.attempts[]? | {stage,status,failure_code,evidence}' /tmp/w9-run-final.json || true
+
+          test "${state}" = "REVIEW"
+          test -z "${failure}"
+
+          refs_after="$(git ls-remote "https://github.com/${REPOSITORY_REF#github:}.git")"
+          test -n "${refs_after}"
+          echo "W9-S1 repository initialization/publication observed after REVIEW delivery."
