@@ -2,6 +2,11 @@ name: Parallax Production Replay
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/production-replay.yml
 
 permissions:
   contents: read
