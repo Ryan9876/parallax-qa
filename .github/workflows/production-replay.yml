@@ -14,11 +14,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  w9-s1-greenfield-continue:
+  w9-s1-greenfield-preview:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      - name: Check out exact deployed Parallax source
+        uses: actions/checkout@v4
+        with:
+          repository: Ryan9876/parallax
+          ref: e5504d9e6c78fd8bbbc71609df66c810e2da2707
+          path: parallax-app
+
       - name: Request bounded Parallax QA OIDC token
         id: oidc
         shell: bash
@@ -33,17 +40,17 @@ jobs:
           echo "::add-mask::${token}"
           echo "token=${token}" >> "${GITHUB_OUTPUT}"
 
-      - name: Continue exact W9-S1 Engineering Run
+      - name: Run frozen W9-S1 through Preview delivery
         shell: bash
         env:
           OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
           API_BASE: https://parallax-api-tan.vercel.app
           REPOSITORY_REF: github:Ryan9876/parallax-qa1
           PROJECT_ID: 0e20392b-debc-4a86-80e8-dd87c57cf510
-          RUN_ID: f0ccbc41-b082-4dd2-a5b6-a68963628bb9
+          PRIOR_RUN_ID: f0ccbc41-b082-4dd2-a5b6-a68963628bb9
         run: |
           set -euo pipefail
-          COOKIE_JAR=/tmp/parallax-w9-s1.cookies
+          COOKIE_JAR=/tmp/parallax-w9-s1-preview.cookies
           MAX_AUTONOMY_REQUESTS=8
 
           api() {
@@ -56,7 +63,7 @@ jobs:
 
           refs="$(git ls-remote "https://github.com/${REPOSITORY_REF#github:}.git")"
           test -z "${refs}"
-          echo "W9-S1 target remains empty before continuation: ${REPOSITORY_REF}"
+          echo "W9-S1 target verified empty before Preview replay: ${REPOSITORY_REF}"
 
           status="$(curl --silent --show-error \
             --output /tmp/w9-session.json \
@@ -67,23 +74,48 @@ jobs:
           test "${status}" = "200"
           jq -e '.authenticated == true' /tmp/w9-session.json >/dev/null
 
-          api "${API_BASE}/v1/engineering-runs/${RUN_ID}" >/tmp/w9-run.json
-          test "$(jq -r '.project_id' /tmp/w9-run.json)" = "${PROJECT_ID}"
+          api "${API_BASE}/v1/engineering-runs/${PRIOR_RUN_ID}" >/tmp/w9-prior-run.json
+          prior_state="$(jq -r '.state' /tmp/w9-prior-run.json)"
+          prior_revision="$(jq -r '.revision' /tmp/w9-prior-run.json)"
+          if [ "${prior_state}" = "REVIEW" ]; then
+            jq -n \
+              --arg operation_key "w9-s1-retire-source-only-${PRIOR_RUN_ID}-${prior_revision}" \
+              --argjson expected_revision "${prior_revision}" \
+              '{operation_key:$operation_key,expected_revision:$expected_revision}' >/tmp/w9-cancel.json
+            api --data-binary @/tmp/w9-cancel.json \
+              -X POST "${API_BASE}/v1/engineering-runs/${PRIOR_RUN_ID}/cancel" >/tmp/w9-cancelled.json
+            echo "Retired stale source-only W9-S1 run after preserving its evidence."
+          fi
+
+          jq -n '{delivery_mode:"vercel-preview"}' >/tmp/w9-delivery.json
+          api --data-binary @/tmp/w9-delivery.json \
+            -X PATCH "${API_BASE}/v1/projects/${PROJECT_ID}/delivery" >/tmp/w9-project.json
+          test "$(jq -r '.delivery_mode' /tmp/w9-project.json)" = "vercel-preview"
+          test "$(jq -r '.repository_ref' /tmp/w9-project.json)" = "${REPOSITORY_REF}"
+          echo "W9-S1 Project delivery mode verified: vercel-preview"
+
+          cd parallax-app
+          export COOKIE_JAR
+          bash scripts/w9_s1_reference_trial.sh | tee /tmp/w9-reference.log
+          run_id="$(awk '/^Engineering Run:/ {print $3}' /tmp/w9-reference.log | tail -1)"
+          test -n "${run_id}"
+          echo "Fresh canonical W9-S1 run: ${run_id}"
+
+          api "${API_BASE}/v1/engineering-runs/${run_id}" >/tmp/w9-run.json
           state="$(jq -r '.state' /tmp/w9-run.json)"
           revision="$(jq -r '.revision' /tmp/w9-run.json)"
           failure="$(jq -r '.last_failure_code // ""' /tmp/w9-run.json)"
           test -z "${failure}"
-          echo "W9-S1 starting continuation: state=${state}; revision=${revision}"
 
           completed_requests=0
           for request_index in $(seq 1 "${MAX_AUTONOMY_REQUESTS}"); do
             case "${state}" in
               REVIEW) break ;;
               PLAN|IMPLEMENT|BUILD|TEST|VERIFY) ;;
-              *) echo "Unexpected W9-S1 continuation state before request: ${state}" >&2; exit 1 ;;
+              *) echo "Unexpected W9-S1 continuation state: ${state}" >&2; exit 1 ;;
             esac
 
-            operation_key="w9-s1-continue-${RUN_ID}-${revision}"
+            operation_key="w9-s1-preview-${run_id}-${revision}"
             jq -n --arg operation_key "${operation_key}" --argjson expected_revision "${revision}" \
               '{operation_key:$operation_key,expected_revision:$expected_revision}' >/tmp/w9-autonomous.json
 
@@ -94,7 +126,7 @@ jobs:
               -H "X-Parallax-Session: 1" \
               -H "Content-Type: application/json" \
               --data-binary @/tmp/w9-autonomous.json \
-              -X POST "${API_BASE}/v1/engineering-runs/${RUN_ID}/autonomous" || true)"
+              -X POST "${API_BASE}/v1/engineering-runs/${run_id}/autonomous" || true)"
 
             if [ "${autonomous_status}" != "200" ]; then
               echo "W9-S1 autonomy HTTP failure: request=${request_index}; status=${autonomous_status}" >&2
@@ -107,25 +139,21 @@ jobs:
             revision="$(jq -r '.run.revision' /tmp/w9-autonomous-result.json)"
             failure="$(jq -r '.run.last_failure_code // ""' /tmp/w9-autonomous-result.json)"
             stop_reason="$(jq -r '.stop_reason // ""' /tmp/w9-autonomous-result.json)"
-            echo "W9-S1 request ${request_index}: state=${state}; revision=${revision}; stop_reason=${stop_reason}; failure=${failure:-none}"
-
-            if [ -n "${failure}" ]; then
-              exit 1
-            fi
+            echo "W9-S1 continuation ${request_index}: state=${state}; revision=${revision}; stop_reason=${stop_reason}; failure=${failure:-none}"
+            test -z "${failure}"
             if [ "${state}" = "REVIEW" ]; then
               break
             fi
           done
 
-          api "${API_BASE}/v1/engineering-runs/${RUN_ID}" >/tmp/w9-run-final.json
+          api "${API_BASE}/v1/engineering-runs/${run_id}" >/tmp/w9-run-final.json
           state="$(jq -r '.state' /tmp/w9-run-final.json)"
           failure="$(jq -r '.last_failure_code // ""' /tmp/w9-run-final.json)"
-          echo "W9-S1 final: run=${RUN_ID}; requests=${completed_requests}; state=${state}; failure=${failure:-none}"
+          echo "W9-S1 final: project=${PROJECT_ID}; run=${run_id}; requests=${completed_requests}; state=${state}; failure=${failure:-none}"
           jq -c '.attempts[]? | {stage,status,failure_code,evidence}' /tmp/w9-run-final.json || true
-
           test "${state}" = "REVIEW"
           test -z "${failure}"
 
           refs_after="$(git ls-remote "https://github.com/${REPOSITORY_REF#github:}.git")"
           test -n "${refs_after}"
-          echo "W9-S1 repository initialization/publication observed after REVIEW delivery."
+          echo "W9-S1 repository initialization/publication observed after verified REVIEW delivery."
