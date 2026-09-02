@@ -1,3 +1,4 @@
+# Temporary P2-V0.23.40 acceptance retry after QA branch materialization.
 name: Parallax Production Replay
 
 on:
