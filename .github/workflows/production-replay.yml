@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  w9-s1-p02338-acceptance:
+  w9-s1-p02339-acceptance:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -37,7 +37,7 @@ jobs:
           RUN_ID: a64d56b7-ad42-42ad-9562-891783363f4a
         run: |
           set -euo pipefail
-          cookie_jar="/tmp/parallax-w9-s1-p02338.cookies"
+          cookie_jar="/tmp/parallax-w9-s1-p02339.cookies"
 
           session_status="$(curl --silent --show-error --output /tmp/session.json --write-out '%{http_code}' --cookie-jar "${cookie_jar}" -H "Authorization: Bearer ${OIDC_TOKEN}" -X POST "${API_BASE}/v1/session/qa-automation")"
           echo "QA session status=${session_status}"
@@ -50,7 +50,7 @@ jobs:
           jq -e '.state == "REVIEW" and .revision == 6' /tmp/run-before.json >/dev/null
           revision="$(jq -r '.revision' /tmp/run-before.json)"
 
-          autonomous_status="$(curl --silent --show-error --output /tmp/autonomous.json --write-out '%{http_code}' --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" -H 'Content-Type: application/json' -X POST --data "{\"operation_key\":\"w9-s1-p2-v0-23-38-production-acceptance\",\"expected_revision\":${revision}}" "${API_BASE}/v1/engineering-runs/${RUN_ID}/autonomous")"
+          autonomous_status="$(curl --silent --show-error --output /tmp/autonomous.json --write-out '%{http_code}' --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" -H 'Content-Type: application/json' -X POST --data "{\"operation_key\":\"w9-s1-p2-v0-23-39-production-acceptance\",\"expected_revision\":${revision}}" "${API_BASE}/v1/engineering-runs/${RUN_ID}/autonomous")"
           echo "W9-S1 autonomous status=${autonomous_status}"
           jq -c . /tmp/autonomous.json || cat /tmp/autonomous.json
 
@@ -62,13 +62,13 @@ jobs:
           echo 'W9-S1 new durable events:'
           jq -c '.events[]? | {sequence,event_type,stage,outcome,subsystem,failure_code,source_lineage_ref,evidence_ref,summary,metadata}' /tmp/events-after.json
 
-          for prior_code in TARGET_DISCOVERY_UNBOUNDED PROVIDER_CONFLICT GREENFIELD_BASELINE_MISMATCH; do
+          for prior_code in TARGET_DISCOVERY_UNBOUNDED PROVIDER_CONFLICT GREENFIELD_BASELINE_MISMATCH SOURCE_NOT_FOUND; do
             if grep -q "${prior_code}" /tmp/autonomous.json; then
               echo "${prior_code} recurred in response" >&2
               exit 21
             fi
           done
-          if jq -e '.events[]? | select((.metadata.result_code // "") == "TARGET_DISCOVERY_UNBOUNDED" or (.metadata.result_code // "") == "PROVIDER_CONFLICT" or (.metadata.result_code // "") == "GREENFIELD_BASELINE_MISMATCH")' /tmp/events-after.json >/dev/null; then
+          if jq -e '.events[]? | select((.metadata.result_code // "") == "TARGET_DISCOVERY_UNBOUNDED" or (.metadata.result_code // "") == "PROVIDER_CONFLICT" or (.metadata.result_code // "") == "GREENFIELD_BASELINE_MISMATCH" or (.metadata.result_code // "") == "SOURCE_NOT_FOUND")' /tmp/events-after.json >/dev/null; then
             echo 'Prior bounded blocker recurred in new durable evidence' >&2
             exit 22
           fi
