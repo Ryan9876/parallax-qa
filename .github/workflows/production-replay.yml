@@ -74,3 +74,92 @@ jobs:
           fi
           test "${autonomous_status}" = "200"
           jq -e '.stop_reason == "REVIEW_REQUIRED" and .run.state == "REVIEW" and .run.revision == 6' /tmp/autonomous.json >/dev/null
+
+  p02340-structural-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Request bounded Parallax QA OIDC token
+        id: oidc
+        shell: bash
+        run: |
+          set -euo pipefail
+          request_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=parallax%3A%2F%2Fqa-production"
+          token="$(curl --fail --silent --show-error -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${request_url}" | jq -r '.value')"
+          test -n "${token}"
+          test "${token}" != "null"
+          echo "::add-mask::${token}"
+          echo "token=${token}" >> "${GITHUB_OUTPUT}"
+
+      - name: Prove new static-web TEST and VERIFY remain structural-only through REVIEW
+        shell: bash
+        env:
+          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
+          API_BASE: https://parallax-api-tan.vercel.app
+          REFERENCE_RUN_ID: a64d56b7-ad42-42ad-9562-891783363f4a
+        run: |
+          set -euo pipefail
+          cookie_jar="/tmp/parallax-p02340.cookies"
+          api() {
+            curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" -H "Content-Type: application/json" "$@"
+          }
+
+          session_status="$(curl --silent --show-error --output /tmp/session.json --write-out '%{http_code}' --cookie-jar "${cookie_jar}" -H "Authorization: Bearer ${OIDC_TOKEN}" -X POST "${API_BASE}/v1/session/qa-automation")"
+          test "${session_status}" = "200"
+          jq -e '.authenticated == true' /tmp/session.json >/dev/null
+
+          api "${API_BASE}/v1/engineering-runs/${REFERENCE_RUN_ID}" >/tmp/reference-run.json
+          project_id="$(jq -r '.project_id' /tmp/reference-run.json)"
+          test -n "${project_id}"
+          test "${project_id}" != "null"
+          echo "QA Project=${project_id}"
+
+          jq -n --arg project_id "${project_id}" '{mode:"code",project_id:$project_id}' >/tmp/conversation-create.json
+          api --data-binary @/tmp/conversation-create.json -X POST "${API_BASE}/v1/conversations" >/tmp/conversation.json
+          conversation_id="$(jq -r '.id' /tmp/conversation.json)"
+          test -n "${conversation_id}"
+
+          prompt='Make one small, safe improvement to the existing static Decision Ledger application: add a visible footer note that says "Validation evidence test" without removing or weakening any existing functionality. Preserve the existing static-web architecture and local persistence behavior. Acceptance criteria should require the footer text to be visible and existing application behavior to remain intact.'
+          jq -n --arg content "${prompt}" '{content:$content,material_scope_change:false}' >/tmp/response-request.json
+          response_status="$(curl --silent --show-error --max-time 300 --output /tmp/response.sse --write-out '%{http_code}' --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" -H "Content-Type: application/json" -H "Accept: text/event-stream" --data-binary @/tmp/response-request.json -X POST "${API_BASE}/v1/conversations/${conversation_id}/responses" || true)"
+          echo "response_status=${response_status}"
+          test "${response_status}" = "200"
+
+          api -X POST "${API_BASE}/v1/conversations/${conversation_id}/work-specifications/draft" >/tmp/spec.json
+          spec_id="$(jq -r '.id' /tmp/spec.json)"
+          jq -e '.acceptance_criteria | length > 0' /tmp/spec.json >/dev/null
+          api -X POST "${API_BASE}/v1/work-specifications/${spec_id}/approve" >/tmp/approved-spec.json
+
+          jq -n --arg conversation_id "${conversation_id}" --arg work_specification_id "${spec_id}" '{conversation_id:$conversation_id,work_specification_id:$work_specification_id}' >/tmp/activate.json
+          api --data-binary @/tmp/activate.json -X POST "${API_BASE}/v1/engineering-runs/activate" >/tmp/run.json
+          run_id="$(jq -r '.id' /tmp/run.json)"
+          run_revision="$(jq -r '.revision' /tmp/run.json)"
+          test "${run_id}" != "${REFERENCE_RUN_ID}"
+          echo "P2-V0.23.40 acceptance run=${run_id}"
+
+          jq -n --arg operation_key "p2-v0-23-40-production-acceptance-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --argjson expected_revision "${run_revision}" '{operation_key:$operation_key,expected_revision:$expected_revision}' >/tmp/autonomous-request.json
+          autonomous_status="$(curl --silent --show-error --max-time 900 --output /tmp/autonomous.json --write-out '%{http_code}' --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" -H "Content-Type: application/json" --data-binary @/tmp/autonomous-request.json -X POST "${API_BASE}/v1/engineering-runs/${run_id}/autonomous" || true)"
+          echo "autonomous_status=${autonomous_status}"
+          jq -c '{stop_reason,run:{id:.run.id,state:.run.state,revision:.run.revision,last_failure_code:.run.last_failure_code}}' /tmp/autonomous.json || cat /tmp/autonomous.json
+          test "${autonomous_status}" = "200"
+          jq -e '.stop_reason == "REVIEW_REQUIRED" and .run.state == "REVIEW"' /tmp/autonomous.json >/dev/null
+
+          api "${API_BASE}/v1/engineering-runs/${run_id}" >/tmp/run-final.json
+          jq -c '{id,state,revision,last_failure_code,acceptance_criteria,attempts:[.attempts[] | {stage,status,failure_code,evidence}]}' /tmp/run-final.json
+          jq -e '.state == "REVIEW"' /tmp/run-final.json >/dev/null
+
+          jq -r '.acceptance_criteria[].id' /tmp/run-final.json | sort -u >/tmp/required.ids
+          test -s /tmp/required.ids
+          for stage in TEST VERIFY; do
+            jq --arg stage "${stage}" -e '[.attempts[] | select(.stage == $stage and .status == "PASSED")] | length == 1' /tmp/run-final.json >/dev/null
+            jq --arg stage "${stage}" -c '.attempts[] | select(.stage == $stage and .status == "PASSED") | .evidence' /tmp/run-final.json >/tmp/stage-evidence.json
+            jq -e '.acceptance_verification_scope == "STRUCTURAL_ONLY"' /tmp/stage-evidence.json >/dev/null
+            jq -e '.acceptance_ids_verified == []' /tmp/stage-evidence.json >/dev/null
+            jq -r '.acceptance_ids_targeted[]' /tmp/stage-evidence.json | sort -u >/tmp/targeted.ids
+            jq -r '.acceptance_ids_unverified[]' /tmp/stage-evidence.json | sort -u >/tmp/unverified.ids
+            diff -u /tmp/required.ids /tmp/targeted.ids
+            diff -u /tmp/required.ids /tmp/unverified.ids
+            echo "${stage}: STRUCTURAL_ONLY; verified=0; targeted=$(wc -l </tmp/targeted.ids); unverified=$(wc -l </tmp/unverified.ids)"
+          done
+
+          echo "P2_V0_23_40_ACCEPTANCE_RUN_ID=${run_id}"
