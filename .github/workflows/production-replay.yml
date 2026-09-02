@@ -1,6 +1,7 @@
 name: Parallax Production Replay
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
 
@@ -8,40 +9,103 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: parallax-production-replay
+  cancel-in-progress: false
+
 jobs:
-  w9-s1-evidence:
+  python-source-only:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
+      - uses: actions/checkout@v4
+
       - name: Request bounded Parallax QA OIDC token
         id: oidc
         shell: bash
         run: |
           set -euo pipefail
           request_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=parallax%3A%2F%2Fqa-production"
-          token="$(curl --fail --silent --show-error -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${request_url}" | jq -r '.value')"
+          token="$(curl --fail --silent --show-error \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${request_url}" | jq -r '.value')"
           test -n "${token}"
           test "${token}" != "null"
           echo "::add-mask::${token}"
           echo "token=${token}" >> "${GITHUB_OUTPUT}"
 
-      - name: Read exact W9-S1 post-resume evidence
+      - name: Run Python source-only full experience
         shell: bash
         env:
           OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
           API_BASE: https://parallax-api-tan.vercel.app
-          RUN_ID: a64d56b7-ad42-42ad-9562-891783363f4a
+          REPOSITORY_REF: github:Ryan9876/Movies
+        run: bash scripts/python_full_experience.sh
+
+  ot-time-source-only:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Request bounded Parallax QA OIDC token
+        id: oidc
+        shell: bash
         run: |
           set -euo pipefail
-          cookie_jar="/tmp/parallax-w9-s1-evidence.cookies"
-          status="$(curl --silent --show-error --output /tmp/session.json --write-out '%{http_code}' --cookie-jar "${cookie_jar}" -H "Authorization: Bearer ${OIDC_TOKEN}" -X POST "${API_BASE}/v1/session/qa-automation")"
-          test "${status}" = "200"
-          jq -e '.authenticated == true' /tmp/session.json >/dev/null
+          request_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=parallax%3A%2F%2Fqa-production"
+          token="$(curl --fail --silent --show-error \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${request_url}" | jq -r '.value')"
+          test -n "${token}"
+          test "${token}" != "null"
+          echo "::add-mask::${token}"
+          echo "token=${token}" >> "${GITHUB_OUTPUT}"
 
-          curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}" > /tmp/run.json
-          curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}/events?after_sequence=13&limit=100" > /tmp/events.json
+      - name: Run OT Time source-only full experience
+        shell: bash
+        env:
+          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
+          API_BASE: https://parallax-api-tan.vercel.app
+          REPOSITORY_REF: github:Ryan9876/ot-time
+        run: bash scripts/ot_time_full_experience.sh
 
-          echo 'W9-S1 durable run:'
-          jq -c '{id,state,revision,resume_stage,last_failure_code}' /tmp/run.json
-          echo 'W9-S1 durable events after sequence 13:'
-          jq -c '.events[]? | {sequence,event_type,stage,outcome,subsystem,failure_code,summary,metadata}' /tmp/events.json
+  marker-free-static:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Request bounded Parallax QA OIDC token
+        id: oidc
+        shell: bash
+        run: |
+          set -euo pipefail
+          request_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=parallax%3A%2F%2Fqa-production"
+          token="$(curl --fail --silent --show-error \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${request_url}" | jq -r '.value')"
+          test -n "${token}"
+          test "${token}" != "null"
+          echo "::add-mask::${token}"
+          echo "token=${token}" >> "${GITHUB_OUTPUT}"
+
+      - name: Retire prior QA fixture state
+        shell: bash
+        env:
+          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
+          API_BASE: https://parallax-api-tan.vercel.app
+          REPOSITORY_REF: github:Ryan9876/Movies
+        run: bash scripts/retire_marker_free_project.sh
+
+      - name: Run marker-free static P2-V0.23.33 replay
+        shell: bash
+        env:
+          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
+          API_BASE: https://parallax-api-tan.vercel.app
+          REPOSITORY_REF: github:Ryan9876/Movies
+          ALLOW_MARKER_FREE_README_ONLY: '1'
+        run: bash scripts/marker_free_static_replay.sh
