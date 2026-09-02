@@ -9,9 +9,9 @@ permissions:
   id-token: write
 
 jobs:
-  w9-s1-resume:
+  w9-s1-evidence:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - name: Request bounded Parallax QA OIDC token
         id: oidc
@@ -19,15 +19,13 @@ jobs:
         run: |
           set -euo pipefail
           request_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=parallax%3A%2F%2Fqa-production"
-          token="$(curl --fail --silent --show-error \
-            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${request_url}" | jq -r '.value')"
+          token="$(curl --fail --silent --show-error -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${request_url}" | jq -r '.value')"
           test -n "${token}"
           test "${token}" != "null"
           echo "::add-mask::${token}"
           echo "token=${token}" >> "${GITHUB_OUTPUT}"
 
-      - name: Resume exact frozen W9-S1 REVIEW run and read evidence
+      - name: Read exact W9-S1 post-resume evidence
         shell: bash
         env:
           OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
@@ -35,33 +33,15 @@ jobs:
           RUN_ID: a64d56b7-ad42-42ad-9562-891783363f4a
         run: |
           set -euo pipefail
-          cookie_jar="/tmp/parallax-w9-s1-resume.cookies"
-
+          cookie_jar="/tmp/parallax-w9-s1-evidence.cookies"
           status="$(curl --silent --show-error --output /tmp/session.json --write-out '%{http_code}' --cookie-jar "${cookie_jar}" -H "Authorization: Bearer ${OIDC_TOKEN}" -X POST "${API_BASE}/v1/session/qa-automation")"
-          echo "QA session status=${status}"
           test "${status}" = "200"
           jq -e '.authenticated == true' /tmp/session.json >/dev/null
 
-          curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}" > /tmp/run-before.json
-          echo 'W9-S1 before resume:'
-          jq -c '{id,state,revision,resume_stage,last_failure_code}' /tmp/run-before.json
-          jq -e '.state == "REVIEW" and .revision == 6' /tmp/run-before.json >/dev/null
-          revision="$(jq -r '.revision' /tmp/run-before.json)"
+          curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}" > /tmp/run.json
+          curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}/events?after_sequence=13&limit=100" > /tmp/events.json
 
-          status="$(curl --silent --show-error --output /tmp/autonomous.json --write-out '%{http_code}' --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" -H 'Content-Type: application/json' -X POST --data "{\"operation_key\":\"w9-s1-p2-v0-23-36-resume-review\",\"expected_revision\":${revision}}" "${API_BASE}/v1/engineering-runs/${RUN_ID}/autonomous")"
-          echo "W9-S1 autonomous status=${status}"
-          jq -c . /tmp/autonomous.json || cat /tmp/autonomous.json
-          test "${status}" = "200"
-
-          curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}" > /tmp/run-after.json
-          curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}/events?after_sequence=13&limit=100" > /tmp/events-after.json
-
-          echo 'W9-S1 after resume:'
-          jq -c '{id,state,revision,resume_stage,last_failure_code}' /tmp/run-after.json
-          echo 'W9-S1 new events:'
-          jq -c '.events[]? | {sequence,event_type,stage,outcome,subsystem,failure_code,summary,metadata}' /tmp/events-after.json
-
-          if jq -e '.events[]? | select((.metadata.result_code // "") == "TARGET_DISCOVERY_UNBOUNDED")' /tmp/events-after.json >/dev/null; then
-            echo 'TARGET_DISCOVERY_UNBOUNDED recurred' >&2
-            exit 1
-          fi
+          echo 'W9-S1 durable run:'
+          jq -c '{id,state,revision,resume_stage,last_failure_code}' /tmp/run.json
+          echo 'W9-S1 durable events after sequence 13:'
+          jq -c '.events[]? | {sequence,event_type,stage,outcome,subsystem,failure_code,summary,metadata}' /tmp/events.json
