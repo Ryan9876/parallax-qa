@@ -1,7 +1,6 @@
 name: Parallax Production Replay
 
 on:
-  workflow_dispatch:
   push:
     branches: [main]
 
@@ -14,98 +13,66 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  python-source-only:
-    if: github.event_name == 'workflow_dispatch'
+  w9-s1-p02337-acceptance:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-
       - name: Request bounded Parallax QA OIDC token
         id: oidc
         shell: bash
         run: |
           set -euo pipefail
           request_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=parallax%3A%2F%2Fqa-production"
-          token="$(curl --fail --silent --show-error \
-            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${request_url}" | jq -r '.value')"
+          token="$(curl --fail --silent --show-error -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${request_url}" | jq -r '.value')"
           test -n "${token}"
           test "${token}" != "null"
           echo "::add-mask::${token}"
           echo "token=${token}" >> "${GITHUB_OUTPUT}"
 
-      - name: Run Python source-only full experience
+      - name: Continue exact frozen W9-S1 run and capture evidence
         shell: bash
         env:
           OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
           API_BASE: https://parallax-api-tan.vercel.app
-          REPOSITORY_REF: github:Ryan9876/Movies
-        run: bash scripts/python_full_experience.sh
-
-  ot-time-source-only:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Request bounded Parallax QA OIDC token
-        id: oidc
-        shell: bash
+          RUN_ID: a64d56b7-ad42-42ad-9562-891783363f4a
         run: |
           set -euo pipefail
-          request_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=parallax%3A%2F%2Fqa-production"
-          token="$(curl --fail --silent --show-error \
-            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${request_url}" | jq -r '.value')"
-          test -n "${token}"
-          test "${token}" != "null"
-          echo "::add-mask::${token}"
-          echo "token=${token}" >> "${GITHUB_OUTPUT}"
+          cookie_jar="/tmp/parallax-w9-s1-p02337.cookies"
 
-      - name: Run OT Time source-only full experience
-        shell: bash
-        env:
-          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
-          API_BASE: https://parallax-api-tan.vercel.app
-          REPOSITORY_REF: github:Ryan9876/ot-time
-        run: bash scripts/ot_time_full_experience.sh
+          session_status="$(curl --silent --show-error --output /tmp/session.json --write-out '%{http_code}' --cookie-jar "${cookie_jar}" -H "Authorization: Bearer ${OIDC_TOKEN}" -X POST "${API_BASE}/v1/session/qa-automation")"
+          echo "QA session status=${session_status}"
+          test "${session_status}" = "200"
+          jq -e '.authenticated == true' /tmp/session.json >/dev/null
 
-  marker-free-static:
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
+          curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}" > /tmp/run-before.json
+          echo 'W9-S1 before:'
+          jq -c '{id,state,revision,resume_stage,last_failure_code}' /tmp/run-before.json
+          jq -e '.state == "REVIEW" and .revision == 6' /tmp/run-before.json >/dev/null
+          revision="$(jq -r '.revision' /tmp/run-before.json)"
 
-      - name: Request bounded Parallax QA OIDC token
-        id: oidc
-        shell: bash
-        run: |
-          set -euo pipefail
-          request_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=parallax%3A%2F%2Fqa-production"
-          token="$(curl --fail --silent --show-error \
-            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${request_url}" | jq -r '.value')"
-          test -n "${token}"
-          test "${token}" != "null"
-          echo "::add-mask::${token}"
-          echo "token=${token}" >> "${GITHUB_OUTPUT}"
+          autonomous_status="$(curl --silent --show-error --output /tmp/autonomous.json --write-out '%{http_code}' --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" -H 'Content-Type: application/json' -X POST --data "{\"operation_key\":\"w9-s1-p2-v0-23-37-production-acceptance\",\"expected_revision\":${revision}}" "${API_BASE}/v1/engineering-runs/${RUN_ID}/autonomous")"
+          echo "W9-S1 autonomous status=${autonomous_status}"
+          jq -c . /tmp/autonomous.json || cat /tmp/autonomous.json
 
-      - name: Retire prior QA fixture state
-        shell: bash
-        env:
-          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
-          API_BASE: https://parallax-api-tan.vercel.app
-          REPOSITORY_REF: github:Ryan9876/Movies
-        run: bash scripts/retire_marker_free_project.sh
+          curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}" > /tmp/run-after.json
+          curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}/events?after_sequence=15&limit=100" > /tmp/events-after.json
 
-      - name: Run marker-free static P2-V0.23.33 replay
-        shell: bash
-        env:
-          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
-          API_BASE: https://parallax-api-tan.vercel.app
-          REPOSITORY_REF: github:Ryan9876/Movies
-          ALLOW_MARKER_FREE_README_ONLY: '1'
-        run: bash scripts/marker_free_static_replay.sh
+          echo 'W9-S1 after:'
+          jq -c '{id,state,revision,resume_stage,last_failure_code}' /tmp/run-after.json
+          echo 'W9-S1 new durable events:'
+          jq -c '.events[]? | {sequence,event_type,stage,outcome,subsystem,failure_code,source_lineage_ref,evidence_ref,summary,metadata}' /tmp/events-after.json
+
+          if grep -q 'TARGET_DISCOVERY_UNBOUNDED' /tmp/autonomous.json; then
+            echo 'TARGET_DISCOVERY_UNBOUNDED recurred in response' >&2
+            exit 21
+          fi
+          if grep -q 'PROVIDER_CONFLICT' /tmp/autonomous.json; then
+            echo 'PROVIDER_CONFLICT recurred in response' >&2
+            exit 22
+          fi
+          if jq -e '.events[]? | select((.metadata.result_code // "") == "TARGET_DISCOVERY_UNBOUNDED" or (.metadata.result_code // "") == "PROVIDER_CONFLICT")' /tmp/events-after.json >/dev/null; then
+            echo 'Prior bounded blocker recurred in new durable evidence' >&2
+            exit 23
+          fi
+          test "${autonomous_status}" = "200"
+          jq -e '.stop_reason == "REVIEW_REQUIRED" and .run.state == "REVIEW" and .run.revision == 6' /tmp/autonomous.json >/dev/null
