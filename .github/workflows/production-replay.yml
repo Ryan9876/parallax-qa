@@ -73,7 +73,7 @@ jobs:
         run: bash scripts/ot_time_full_experience.sh
 
   marker-free-static:
-    if: github.event_name == 'push' && contains(github.event.head_commit.message, 'W9-S1 diagnostic') == false
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -109,59 +109,3 @@ jobs:
           REPOSITORY_REF: github:Ryan9876/Movies
           ALLOW_MARKER_FREE_README_ONLY: '1'
         run: bash scripts/marker_free_static_replay.sh
-
-  w9-s1-evidence-read:
-    if: github.event_name == 'push' && contains(github.event.head_commit.message, 'W9-S1 diagnostic')
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Request bounded Parallax QA OIDC token
-        id: oidc
-        shell: bash
-        run: |
-          set -euo pipefail
-          request_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=parallax%3A%2F%2Fqa-production"
-          token="$(curl --fail --silent --show-error \
-            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${request_url}" | jq -r '.value')"
-          test -n "${token}"
-          test "${token}" != "null"
-          echo "::add-mask::${token}"
-          echo "token=${token}" >> "${GITHUB_OUTPUT}"
-
-      - name: Read persisted W9-S1 run and delivery evidence
-        shell: bash
-        env:
-          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
-          API_BASE: https://parallax-api-tan.vercel.app
-          RUN_ID: a64d56b7-ad42-42ad-9562-891783363f4a
-        run: |
-          set -euo pipefail
-          cookie_jar="/tmp/parallax-w9-s1-read.cookies"
-          status="$(curl --silent --show-error \
-            --output /tmp/parallax-w9-s1-session.json \
-            --write-out '%{http_code}' \
-            --cookie-jar "${cookie_jar}" \
-            -H "Authorization: Bearer ${OIDC_TOKEN}" \
-            -X POST "${API_BASE}/v1/session/qa-automation")"
-          echo "QA session status=${status}"
-          test "${status}" = "200"
-          jq -e '.authenticated == true' /tmp/parallax-w9-s1-session.json >/dev/null
-
-          curl --fail-with-body --silent --show-error \
-            --cookie "${cookie_jar}" \
-            -H "X-Parallax-Session: 1" \
-            "${API_BASE}/v1/engineering-runs/${RUN_ID}" \
-            >/tmp/parallax-w9-s1-run.json
-          curl --fail-with-body --silent --show-error \
-            --cookie "${cookie_jar}" \
-            -H "X-Parallax-Session: 1" \
-            "${API_BASE}/v1/engineering-runs/${RUN_ID}/events?limit=200" \
-            >/tmp/parallax-w9-s1-events.json
-
-          echo 'W9-S1 persisted run summary:'
-          jq -c '{id,state,revision,last_failure_code}' /tmp/parallax-w9-s1-run.json
-          echo 'W9-S1 failed source-delivery events:'
-          jq -c '.events[]? | select((.failure_code // "") == "SOURCE_DELIVERY_FAILED") | {sequence,event_type,stage,outcome,subsystem,failure_code,summary,metadata}' /tmp/parallax-w9-s1-events.json
-          echo 'W9-S1 REVIEW/source-delivery event tail:'
-          jq -c '.events[]? | select((.stage // "") == "REVIEW" or (.event_type // "") == "SOURCE_DELIVERY") | {sequence,event_type,stage,outcome,subsystem,failure_code,summary,metadata}' /tmp/parallax-w9-s1-events.json | tail -n 12
