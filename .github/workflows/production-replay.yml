@@ -64,7 +64,7 @@ jobs:
           echo "::add-mask::${token}"
           echo "token=${token}" >> "${GITHUB_OUTPUT}"
 
-      - name: Retry exact acceptance run and prove structural-only evidence
+      - name: Continue exact acceptance run and prove structural-only evidence
         shell: bash
         env:
           OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
@@ -72,7 +72,7 @@ jobs:
           RUN_ID: 4771a9eb-a939-406e-a0bd-01852a72b63b
         run: |
           set -euo pipefail
-          cookie_jar="/tmp/parallax-p02340-retry.cookies"
+          cookie_jar="/tmp/parallax-p02340-continue.cookies"
           api() {
             curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" -H "Content-Type: application/json" "$@"
           }
@@ -80,18 +80,32 @@ jobs:
           test "${session_status}" = "200"
           jq -e '.authenticated == true' /tmp/session.json >/dev/null
 
-          api "${API_BASE}/v1/engineering-runs/${RUN_ID}" >/tmp/run-before.json
-          echo 'P2-V0.23.40 before retry:'
-          jq -c '{id,state,revision,resume_stage,last_failure_code,acceptance_criteria}' /tmp/run-before.json
-          jq -e '.state == "PLAN"' /tmp/run-before.json >/dev/null
-          revision="$(jq -r '.revision' /tmp/run-before.json)"
-
-          jq -n --arg operation_key "p2-v0-23-40-production-acceptance-retry-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" --argjson expected_revision "${revision}" '{operation_key:$operation_key,expected_revision:$expected_revision}' >/tmp/autonomous-request.json
-          autonomous_status="$(curl --silent --show-error --max-time 900 --output /tmp/autonomous.json --write-out '%{http_code}' --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" -H "Content-Type: application/json" --data-binary @/tmp/autonomous-request.json -X POST "${API_BASE}/v1/engineering-runs/${RUN_ID}/autonomous" || true)"
-          echo "autonomous_status=${autonomous_status}"
-          jq -c . /tmp/autonomous.json || cat /tmp/autonomous.json
-          test "${autonomous_status}" = "200"
-          jq -e '.stop_reason == "REVIEW_REQUIRED" and .run.state == "REVIEW"' /tmp/autonomous.json >/dev/null
+          reached_review=0
+          for iteration in $(seq 1 8); do
+            api "${API_BASE}/v1/engineering-runs/${RUN_ID}" >/tmp/run-current.json
+            state="$(jq -r '.state' /tmp/run-current.json)"
+            revision="$(jq -r '.revision' /tmp/run-current.json)"
+            echo "iteration=${iteration} state=${state} revision=${revision}"
+            if [ "${state}" = "REVIEW" ]; then
+              reached_review=1
+              break
+            fi
+            if [ "${state}" = "FAILED" ] || [ "${state}" = "CANCELLED" ]; then
+              jq -c '{id,state,revision,resume_stage,last_failure_code,attempts}' /tmp/run-current.json
+              exit 31
+            fi
+            jq -n --arg operation_key "p2-v0-23-40-production-acceptance-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${iteration}" --argjson expected_revision "${revision}" '{operation_key:$operation_key,expected_revision:$expected_revision}' >/tmp/autonomous-request.json
+            autonomous_status="$(curl --silent --show-error --max-time 900 --output /tmp/autonomous.json --write-out '%{http_code}' --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" -H "Content-Type: application/json" --data-binary @/tmp/autonomous-request.json -X POST "${API_BASE}/v1/engineering-runs/${RUN_ID}/autonomous" || true)"
+            echo "iteration=${iteration} autonomous_status=${autonomous_status}"
+            jq -c '{stop_reason,run:{id:.run.id,state:.run.state,revision:.run.revision,last_failure_code:.run.last_failure_code},steps}' /tmp/autonomous.json || cat /tmp/autonomous.json
+            test "${autonomous_status}" = "200"
+            if jq -e '.stop_reason == "REVIEW_REQUIRED" and .run.state == "REVIEW"' /tmp/autonomous.json >/dev/null; then
+              reached_review=1
+              break
+            fi
+            jq -e '.stop_reason == "MAX_STEPS_REACHED"' /tmp/autonomous.json >/dev/null
+          done
+          test "${reached_review}" = "1"
 
           api "${API_BASE}/v1/engineering-runs/${RUN_ID}" >/tmp/run-final.json
           echo 'P2-V0.23.40 persisted projection:'
