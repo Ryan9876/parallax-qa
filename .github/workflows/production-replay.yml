@@ -1,4 +1,3 @@
-# Temporary P2-V0.23.40 acceptance retry after QA branch materialization.
 name: Parallax Production Replay
 
 on:
@@ -39,91 +38,39 @@ jobs:
         run: |
           set -euo pipefail
           cookie_jar="/tmp/parallax-w9-s1-p02339.cookies"
+
           session_status="$(curl --silent --show-error --output /tmp/session.json --write-out '%{http_code}' --cookie-jar "${cookie_jar}" -H "Authorization: Bearer ${OIDC_TOKEN}" -X POST "${API_BASE}/v1/session/qa-automation")"
+          echo "QA session status=${session_status}"
           test "${session_status}" = "200"
           jq -e '.authenticated == true' /tmp/session.json >/dev/null
+
           curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}" > /tmp/run-before.json
+          echo 'W9-S1 before:'
+          jq -c '{id,state,revision,resume_stage,last_failure_code}' /tmp/run-before.json
           jq -e '.state == "REVIEW" and .revision == 6' /tmp/run-before.json >/dev/null
           revision="$(jq -r '.revision' /tmp/run-before.json)"
+
           autonomous_status="$(curl --silent --show-error --output /tmp/autonomous.json --write-out '%{http_code}' --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" -H 'Content-Type: application/json' -X POST --data "{\"operation_key\":\"w9-s1-p2-v0-23-39-production-acceptance\",\"expected_revision\":${revision}}" "${API_BASE}/v1/engineering-runs/${RUN_ID}/autonomous")"
+          echo "W9-S1 autonomous status=${autonomous_status}"
+          jq -c . /tmp/autonomous.json || cat /tmp/autonomous.json
+
+          curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}" > /tmp/run-after.json
+          curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}/events?after_sequence=15&limit=100" > /tmp/events-after.json
+
+          echo 'W9-S1 after:'
+          jq -c '{id,state,revision,resume_stage,last_failure_code}' /tmp/run-after.json
+          echo 'W9-S1 new durable events:'
+          jq -c '.events[]? | {sequence,event_type,stage,outcome,subsystem,failure_code,source_lineage_ref,evidence_ref,summary,metadata}' /tmp/events-after.json
+
+          for prior_code in TARGET_DISCOVERY_UNBOUNDED PROVIDER_CONFLICT GREENFIELD_BASELINE_MISMATCH SOURCE_NOT_FOUND; do
+            if grep -q "${prior_code}" /tmp/autonomous.json; then
+              echo "${prior_code} recurred in response" >&2
+              exit 21
+            fi
+          done
+          if jq -e '.events[]? | select((.metadata.result_code // "") == "TARGET_DISCOVERY_UNBOUNDED" or (.metadata.result_code // "") == "PROVIDER_CONFLICT" or (.metadata.result_code // "") == "GREENFIELD_BASELINE_MISMATCH" or (.metadata.result_code // "") == "SOURCE_NOT_FOUND")' /tmp/events-after.json >/dev/null; then
+            echo 'Prior bounded blocker recurred in new durable evidence' >&2
+            exit 22
+          fi
           test "${autonomous_status}" = "200"
           jq -e '.stop_reason == "REVIEW_REQUIRED" and .run.state == "REVIEW" and .run.revision == 6' /tmp/autonomous.json >/dev/null
-
-  p02340-structural-evidence:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - name: Request bounded Parallax QA OIDC token
-        id: oidc
-        shell: bash
-        run: |
-          set -euo pipefail
-          request_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=parallax%3A%2F%2Fqa-production"
-          token="$(curl --fail --silent --show-error -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" "${request_url}" | jq -r '.value')"
-          test -n "${token}"
-          test "${token}" != "null"
-          echo "::add-mask::${token}"
-          echo "token=${token}" >> "${GITHUB_OUTPUT}"
-
-      - name: Continue exact acceptance run and prove structural-only evidence
-        shell: bash
-        env:
-          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
-          API_BASE: https://parallax-api-tan.vercel.app
-          RUN_ID: 4771a9eb-a939-406e-a0bd-01852a72b63b
-        run: |
-          set -euo pipefail
-          cookie_jar="/tmp/parallax-p02340-continue.cookies"
-          api() {
-            curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" -H "Content-Type: application/json" "$@"
-          }
-          session_status="$(curl --silent --show-error --output /tmp/session.json --write-out '%{http_code}' --cookie-jar "${cookie_jar}" -H "Authorization: Bearer ${OIDC_TOKEN}" -X POST "${API_BASE}/v1/session/qa-automation")"
-          test "${session_status}" = "200"
-          jq -e '.authenticated == true' /tmp/session.json >/dev/null
-
-          reached_review=0
-          for iteration in $(seq 1 8); do
-            api "${API_BASE}/v1/engineering-runs/${RUN_ID}" >/tmp/run-current.json
-            state="$(jq -r '.state' /tmp/run-current.json)"
-            revision="$(jq -r '.revision' /tmp/run-current.json)"
-            echo "iteration=${iteration} state=${state} revision=${revision}"
-            if [ "${state}" = "REVIEW" ]; then
-              reached_review=1
-              break
-            fi
-            if [ "${state}" = "FAILED" ] || [ "${state}" = "CANCELLED" ]; then
-              jq -c '{id,state,revision,resume_stage,last_failure_code,attempts}' /tmp/run-current.json
-              exit 31
-            fi
-            jq -n --arg operation_key "p2-v0-23-40-production-acceptance-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${iteration}" --argjson expected_revision "${revision}" '{operation_key:$operation_key,expected_revision:$expected_revision}' >/tmp/autonomous-request.json
-            autonomous_status="$(curl --silent --show-error --max-time 900 --output /tmp/autonomous.json --write-out '%{http_code}' --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" -H "Content-Type: application/json" --data-binary @/tmp/autonomous-request.json -X POST "${API_BASE}/v1/engineering-runs/${RUN_ID}/autonomous" || true)"
-            echo "iteration=${iteration} autonomous_status=${autonomous_status}"
-            jq -c '{stop_reason,run:{id:.run.id,state:.run.state,revision:.run.revision,last_failure_code:.run.last_failure_code},steps}' /tmp/autonomous.json || cat /tmp/autonomous.json
-            test "${autonomous_status}" = "200"
-            if jq -e '.stop_reason == "REVIEW_REQUIRED" and .run.state == "REVIEW"' /tmp/autonomous.json >/dev/null; then
-              reached_review=1
-              break
-            fi
-            jq -e '.stop_reason == "MAX_STEPS_REACHED"' /tmp/autonomous.json >/dev/null
-          done
-          test "${reached_review}" = "1"
-
-          api "${API_BASE}/v1/engineering-runs/${RUN_ID}" >/tmp/run-final.json
-          echo 'P2-V0.23.40 persisted projection:'
-          jq -c '{id,state,revision,last_failure_code,acceptance_criteria,attempts:[.attempts[] | {stage,status,failure_code,evidence}]}' /tmp/run-final.json
-          jq -e '.state == "REVIEW"' /tmp/run-final.json >/dev/null
-          jq -r '.acceptance_criteria[].id' /tmp/run-final.json | sort -u >/tmp/required.ids
-          test -s /tmp/required.ids
-
-          for stage in TEST VERIFY; do
-            jq --arg stage "${stage}" -e '[.attempts[] | select(.stage == $stage and .status == "PASSED")] | length == 1' /tmp/run-final.json >/dev/null
-            jq --arg stage "${stage}" -c '.attempts[] | select(.stage == $stage and .status == "PASSED") | .evidence' /tmp/run-final.json >/tmp/stage-evidence.json
-            jq -e '.acceptance_verification_scope == "STRUCTURAL_ONLY"' /tmp/stage-evidence.json >/dev/null
-            jq -e '.acceptance_ids_verified == []' /tmp/stage-evidence.json >/dev/null
-            jq -r '.acceptance_ids_targeted[]' /tmp/stage-evidence.json | sort -u >/tmp/targeted.ids
-            jq -r '.acceptance_ids_unverified[]' /tmp/stage-evidence.json | sort -u >/tmp/unverified.ids
-            diff -u /tmp/required.ids /tmp/targeted.ids
-            diff -u /tmp/required.ids /tmp/unverified.ids
-            echo "${stage}: STRUCTURAL_ONLY verified=0 targeted=$(wc -l </tmp/targeted.ids) unverified=$(wc -l </tmp/unverified.ids)"
-          done
-          echo "P2_V0_23_40_ACCEPTANCE_RUN_ID=${RUN_ID}"
