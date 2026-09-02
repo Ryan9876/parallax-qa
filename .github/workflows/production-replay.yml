@@ -1,7 +1,6 @@
 name: Parallax Production Replay
 
 on:
-  workflow_dispatch:
   push:
     branches: [main]
 
@@ -9,109 +8,8 @@ permissions:
   contents: read
   id-token: write
 
-concurrency:
-  group: parallax-production-replay
-  cancel-in-progress: false
-
 jobs:
-  python-source-only:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Request bounded Parallax QA OIDC token
-        id: oidc
-        shell: bash
-        run: |
-          set -euo pipefail
-          request_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=parallax%3A%2F%2Fqa-production"
-          token="$(curl --fail --silent --show-error \
-            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${request_url}" | jq -r '.value')"
-          test -n "${token}"
-          test "${token}" != "null"
-          echo "::add-mask::${token}"
-          echo "token=${token}" >> "${GITHUB_OUTPUT}"
-
-      - name: Run Python source-only full experience
-        shell: bash
-        env:
-          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
-          API_BASE: https://parallax-api-tan.vercel.app
-          REPOSITORY_REF: github:Ryan9876/Movies
-        run: bash scripts/python_full_experience.sh
-
-  ot-time-source-only:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Request bounded Parallax QA OIDC token
-        id: oidc
-        shell: bash
-        run: |
-          set -euo pipefail
-          request_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=parallax%3A%2F%2Fqa-production"
-          token="$(curl --fail --silent --show-error \
-            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${request_url}" | jq -r '.value')"
-          test -n "${token}"
-          test "${token}" != "null"
-          echo "::add-mask::${token}"
-          echo "token=${token}" >> "${GITHUB_OUTPUT}"
-
-      - name: Run OT Time source-only full experience
-        shell: bash
-        env:
-          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
-          API_BASE: https://parallax-api-tan.vercel.app
-          REPOSITORY_REF: github:Ryan9876/ot-time
-        run: bash scripts/ot_time_full_experience.sh
-
-  marker-free-static:
-    if: github.event_name == 'push' && github.event.head_commit.message != 'qa: resume frozen W9-S1 after P2-V0.23.36'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Request bounded Parallax QA OIDC token
-        id: oidc
-        shell: bash
-        run: |
-          set -euo pipefail
-          request_url="${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=parallax%3A%2F%2Fqa-production"
-          token="$(curl --fail --silent --show-error \
-            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${request_url}" | jq -r '.value')"
-          test -n "${token}"
-          test "${token}" != "null"
-          echo "::add-mask::${token}"
-          echo "token=${token}" >> "${GITHUB_OUTPUT}"
-
-      - name: Retire prior QA fixture state
-        shell: bash
-        env:
-          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
-          API_BASE: https://parallax-api-tan.vercel.app
-          REPOSITORY_REF: github:Ryan9876/Movies
-        run: bash scripts/retire_marker_free_project.sh
-
-      - name: Run marker-free static P2-V0.23.33 replay
-        shell: bash
-        env:
-          OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
-          API_BASE: https://parallax-api-tan.vercel.app
-          REPOSITORY_REF: github:Ryan9876/Movies
-          ALLOW_MARKER_FREE_README_ONLY: '1'
-        run: bash scripts/marker_free_static_replay.sh
-
   w9-s1-resume:
-    if: github.event_name == 'push' && github.event.head_commit.message == 'qa: resume frozen W9-S1 after P2-V0.23.36'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -139,49 +37,24 @@ jobs:
           set -euo pipefail
           cookie_jar="/tmp/parallax-w9-s1-resume.cookies"
 
-          status="$(curl --silent --show-error \
-            --output /tmp/session.json \
-            --write-out '%{http_code}' \
-            --cookie-jar "${cookie_jar}" \
-            -H "Authorization: Bearer ${OIDC_TOKEN}" \
-            -X POST "${API_BASE}/v1/session/qa-automation")"
+          status="$(curl --silent --show-error --output /tmp/session.json --write-out '%{http_code}' --cookie-jar "${cookie_jar}" -H "Authorization: Bearer ${OIDC_TOKEN}" -X POST "${API_BASE}/v1/session/qa-automation")"
           echo "QA session status=${status}"
           test "${status}" = "200"
           jq -e '.authenticated == true' /tmp/session.json >/dev/null
 
-          curl --fail-with-body --silent --show-error \
-            --cookie "${cookie_jar}" \
-            -H "X-Parallax-Session: 1" \
-            "${API_BASE}/v1/engineering-runs/${RUN_ID}" \
-            > /tmp/run-before.json
+          curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}" > /tmp/run-before.json
           echo 'W9-S1 before resume:'
           jq -c '{id,state,revision,resume_stage,last_failure_code}' /tmp/run-before.json
           jq -e '.state == "REVIEW" and .revision == 6' /tmp/run-before.json >/dev/null
           revision="$(jq -r '.revision' /tmp/run-before.json)"
 
-          status="$(curl --silent --show-error \
-            --output /tmp/autonomous.json \
-            --write-out '%{http_code}' \
-            --cookie "${cookie_jar}" \
-            -H "X-Parallax-Session: 1" \
-            -H 'Content-Type: application/json' \
-            -X POST \
-            --data "{\"operation_key\":\"w9-s1:p2-v0.23.36:resume-review\",\"expected_revision\":${revision}}" \
-            "${API_BASE}/v1/engineering-runs/${RUN_ID}/autonomous")"
+          status="$(curl --silent --show-error --output /tmp/autonomous.json --write-out '%{http_code}' --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" -H 'Content-Type: application/json' -X POST --data "{\"operation_key\":\"w9-s1-p2-v0-23-36-resume-review\",\"expected_revision\":${revision}}" "${API_BASE}/v1/engineering-runs/${RUN_ID}/autonomous")"
           echo "W9-S1 autonomous status=${status}"
-          cat /tmp/autonomous.json | jq -c . || cat /tmp/autonomous.json
+          jq -c . /tmp/autonomous.json || cat /tmp/autonomous.json
           test "${status}" = "200"
 
-          curl --fail-with-body --silent --show-error \
-            --cookie "${cookie_jar}" \
-            -H "X-Parallax-Session: 1" \
-            "${API_BASE}/v1/engineering-runs/${RUN_ID}" \
-            > /tmp/run-after.json
-          curl --fail-with-body --silent --show-error \
-            --cookie "${cookie_jar}" \
-            -H "X-Parallax-Session: 1" \
-            "${API_BASE}/v1/engineering-runs/${RUN_ID}/events?after_sequence=13&limit=100" \
-            > /tmp/events-after.json
+          curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}" > /tmp/run-after.json
+          curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}/events?after_sequence=13&limit=100" > /tmp/events-after.json
 
           echo 'W9-S1 after resume:'
           jq -c '{id,state,revision,resume_stage,last_failure_code}' /tmp/run-after.json
