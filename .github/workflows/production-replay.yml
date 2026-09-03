@@ -13,9 +13,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  w9-s1-p02341-inspect:
+  w9-s1-p02341-acceptance:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 35
     steps:
       - name: Request bounded Parallax QA OIDC token
         id: oidc
@@ -29,25 +29,71 @@ jobs:
           echo "::add-mask::${token}"
           echo "token=${token}" >> "${GITHUB_OUTPUT}"
 
-      - name: Read exact frozen W9-S1 REVIEW state
+      - name: Rework exact frozen W9-S1 REVIEW candidate through protected lifecycle
         shell: bash
         env:
           OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
           API_BASE: https://parallax-api-tan.vercel.app
           RUN_ID: a64d56b7-ad42-42ad-9562-891783363f4a
+          REVIEWED_LINEAGE: src:da5d0fb62d34a3228bb56e7a7d82971c8023a536d11944ba71bcaa51a407b871
         run: |
           set -euo pipefail
           cookie_jar="/tmp/parallax-w9-s1-p02341.cookies"
+          api() {
+            curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" -H 'Content-Type: application/json' "$@"
+          }
+
           session_status="$(curl --silent --show-error --output /tmp/session.json --write-out '%{http_code}' --cookie-jar "${cookie_jar}" -H "Authorization: Bearer ${OIDC_TOKEN}" -X POST "${API_BASE}/v1/session/qa-automation")"
           echo "QA session status=${session_status}"
           test "${session_status}" = "200"
           jq -e '.authenticated == true' /tmp/session.json >/dev/null
 
-          curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}" > /tmp/run.json
-          echo 'W9-S1 exact run state:'
-          jq -c '{id,state,revision,resume_stage,last_failure_code,project_id,work_specification_id,work_specification_revision,work_specification_digest,acceptance_criteria}' /tmp/run.json
-          jq -e '.state == "REVIEW" and .revision == 6' /tmp/run.json >/dev/null
+          api "${API_BASE}/v1/engineering-runs/${RUN_ID}" > /tmp/run-before.json
+          echo 'W9-S1 before rework:'
+          jq -c '{id,state,revision,binding_status,last_failure_code,acceptance_criteria}' /tmp/run-before.json
+          jq -e --arg lineage "${REVIEWED_LINEAGE}" '.state == "REVIEW" and .revision == 6 and .binding_status == "APPROVED_SPEC_BOUND" and ([.attempts[] | select(.stage == "IMPLEMENT" and .status == "PASSED")][-1].evidence.source_lineage_ref == $lineage)' /tmp/run-before.json >/dev/null
+          jq -e '[.acceptance_criteria[] | select(.id == "AC-03" and (.text | contains("Invalid import fails safely")))] | length == 1' /tmp/run-before.json >/dev/null
+          jq -e '[.acceptance_criteria[] | select(.id == "AC-05" and (.text | contains("Automated tests cover core CRUD")))] | length == 1' /tmp/run-before.json >/dev/null
 
-          curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}/events?after_sequence=0&limit=200" > /tmp/events.json
-          echo 'Latest durable events:'
-          jq -c '.events[-12:][]? | {sequence,event_type,stage,outcome,subsystem,failure_code,source_lineage_ref,evidence_ref,summary,metadata}' /tmp/events.json
+          finding='Under AC-03, reject malformed imported records without mutating persisted valid data or allowing malformed values such as non-array tags to reach rendering. Under AC-05, add automated tests covering core CRUD, persistence, search/filter, and import behavior, including malformed-import rejection. Keep all other approved behavior and scope unchanged.'
+          jq -n --arg operation_key 'w9-s1-p2-v0-23-41-review-rework' --argjson expected_revision 6 --arg finding "${finding}" '{operation_key:$operation_key,expected_revision:$expected_revision,acceptance_ids:["AC-03","AC-05"],finding:$finding}' > /tmp/rework-request.json
+          rework_status="$(curl --silent --show-error --max-time 120 --output /tmp/rework.json --write-out '%{http_code}' --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" -H 'Content-Type: application/json' --data-binary @/tmp/rework-request.json -X POST "${API_BASE}/v1/engineering-runs/${RUN_ID}/review-rework")"
+          echo "REVIEW rework status=${rework_status}"
+          jq -c '{replayed,attempt_id,run:{id:.run.id,state:.run.state,revision:.run.revision,binding_status:.run.binding_status,last_failure_code:.run.last_failure_code}}' /tmp/rework.json || cat /tmp/rework.json
+          test "${rework_status}" = "200"
+          jq -e '.run.id == env.RUN_ID and .run.state == "PLAN" and .run.revision == 7 and .run.binding_status == "APPROVED_SPEC_BOUND"' /tmp/rework.json >/dev/null
+
+          cp /tmp/rework.json /tmp/latest-result.json
+          completed=0
+          while [ "${completed}" -lt 8 ]; do
+            state="$(jq -r '.run.state' /tmp/latest-result.json)"
+            revision="$(jq -r '.run.revision' /tmp/latest-result.json)"
+            if [ "${state}" = "REVIEW" ]; then
+              break
+            fi
+            case "${state}" in PLAN|IMPLEMENT|BUILD|TEST|VERIFY) ;; *) echo "Unexpected autonomous state ${state}" >&2; exit 31 ;; esac
+            completed=$((completed + 1))
+            operation_key="autonomous-auto-${RUN_ID}-${revision}"
+            jq -n --arg operation_key "${operation_key}" --argjson expected_revision "${revision}" '{operation_key:$operation_key,expected_revision:$expected_revision}' > /tmp/autonomous-request.json
+            autonomous_status="$(curl --silent --show-error --max-time 300 --output /tmp/autonomous.json --write-out '%{http_code}' --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" -H 'Content-Type: application/json' --data-binary @/tmp/autonomous-request.json -X POST "${API_BASE}/v1/engineering-runs/${RUN_ID}/autonomous" || true)"
+            echo "Autonomy request ${completed}: state=${state} revision=${revision} status=${autonomous_status}"
+            jq -c '{stop_reason,run:{id:.run.id,state:.run.state,revision:.run.revision,binding_status:.run.binding_status,last_failure_code:.run.last_failure_code}}' /tmp/autonomous.json || cat /tmp/autonomous.json
+            test "${autonomous_status}" = "200"
+            jq -e --argjson prior "${revision}" '.run.id == env.RUN_ID and .run.revision > $prior' /tmp/autonomous.json >/dev/null
+            cp /tmp/autonomous.json /tmp/latest-result.json
+          done
+
+          api "${API_BASE}/v1/engineering-runs/${RUN_ID}" > /tmp/run-after.json
+          api "${API_BASE}/v1/engineering-runs/${RUN_ID}/events?after_sequence=16&limit=200" > /tmp/events-after.json
+          echo 'W9-S1 after rework cycle:'
+          jq -c '{id,state,revision,binding_status,resume_stage,last_failure_code}' /tmp/run-after.json
+          echo 'New durable attempts:'
+          jq -c '.attempts[-12:][]? | {stage,status,failure_code,evidence:{source_lineage_ref:.evidence.source_lineage_ref,base_source_lineage_ref:.evidence.base_source_lineage_ref,workspace_digest:.evidence.workspace_digest,review_rework_context_digest:.evidence.review_rework_context_digest,review_rework_acceptance_ids:.evidence.review_rework_acceptance_ids,verification_scope:.evidence.verification_scope,acceptance_ids_verified:.evidence.acceptance_ids_verified,acceptance_ids_unverified:.evidence.acceptance_ids_unverified}}' /tmp/run-after.json
+          echo 'New durable events:'
+          jq -c '.events[]? | {sequence,event_type,stage,outcome,subsystem,failure_code,source_lineage_ref,evidence_ref,summary,metadata}' /tmp/events-after.json
+
+          jq -e '.state == "REVIEW" and .revision > 6 and .binding_status == "APPROVED_SPEC_BOUND" and .last_failure_code == null' /tmp/run-after.json >/dev/null
+          jq -e '[.attempts[] | select(.stage == "PLAN" and .status == "PASSED" and (.evidence.review_rework_context_digest | type == "string") and (.evidence.review_rework_context_digest | length == 64) and .evidence.review_rework_acceptance_ids == ["AC-03","AC-05"]] | length >= 1' /tmp/run-after.json >/dev/null
+          jq -e --arg old "${REVIEWED_LINEAGE}" '[.attempts[] | select(.stage == "IMPLEMENT" and .status == "PASSED")][-1].evidence.source_lineage_ref != $old' /tmp/run-after.json >/dev/null
+          jq -e '[.attempts[] | select((.stage == "TEST" or .stage == "VERIFY") and .status == "PASSED")][-2:] | length == 2 and all(.[]; .evidence.verification_scope == "STRUCTURAL_ONLY" and .evidence.acceptance_ids_verified == [])' /tmp/run-after.json >/dev/null
+          test "${completed}" -le 8
