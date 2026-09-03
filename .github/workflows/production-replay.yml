@@ -13,10 +13,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  w9-s1-p02339-acceptance:
+  w9-s1-p02344-acceptance:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Verify production health and readiness
+        shell: bash
+        env:
+          API_BASE: https://parallax-api-tan.vercel.app
+        run: |
+          set -euo pipefail
+          health_status="$(curl --silent --show-error --output /tmp/health.json --write-out '%{http_code}' "${API_BASE}/health")"
+          ready_status="$(curl --silent --show-error --output /tmp/ready.json --write-out '%{http_code}' "${API_BASE}/ready")"
+          echo "health status=${health_status}"
+          jq -c . /tmp/health.json
+          echo "ready status=${ready_status}"
+          jq -c . /tmp/ready.json
+          test "${health_status}" = "200"
+          test "${ready_status}" = "200"
+          jq -e '.status == "ok"' /tmp/health.json >/dev/null
+          jq -e '.status == "ready" and .database == "ok" and .providers == "ok"' /tmp/ready.json >/dev/null
+
       - name: Request bounded Parallax QA OIDC token
         id: oidc
         shell: bash
@@ -29,48 +46,72 @@ jobs:
           echo "::add-mask::${token}"
           echo "token=${token}" >> "${GITHUB_OUTPUT}"
 
-      - name: Continue exact frozen W9-S1 run and capture evidence
+      - name: Reconcile exact frozen W9-S1 replacement publication
         shell: bash
         env:
           OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
           API_BASE: https://parallax-api-tan.vercel.app
           RUN_ID: a64d56b7-ad42-42ad-9562-891783363f4a
+          REPLACEMENT_LINEAGE: src:001736ab731e243956cf78ede7a0087d2b81595f1008568850eac1e9acc3e809
+          EXPECTED_BRANCH: parallax/0e20392b-a64d56b7-001736ab731e243956cf78ede7a0087d2b81595f1008568850eac1e9acc3e809
         run: |
           set -euo pipefail
-          cookie_jar="/tmp/parallax-w9-s1-p02339.cookies"
+          cookie_jar="/tmp/parallax-w9-s1-p02344.cookies"
 
           session_status="$(curl --silent --show-error --output /tmp/session.json --write-out '%{http_code}' --cookie-jar "${cookie_jar}" -H "Authorization: Bearer ${OIDC_TOKEN}" -X POST "${API_BASE}/v1/session/qa-automation")"
           echo "QA session status=${session_status}"
           test "${session_status}" = "200"
           jq -e '.authenticated == true' /tmp/session.json >/dev/null
 
-          curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}" > /tmp/run-before.json
+          run_before_status="$(curl --silent --show-error --output /tmp/run-before.json --write-out '%{http_code}' --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}")"
+          test "${run_before_status}" = "200"
           echo 'W9-S1 before:'
-          jq -c '{id,state,revision,resume_stage,last_failure_code}' /tmp/run-before.json
-          jq -e '.state == "REVIEW" and .revision == 6' /tmp/run-before.json >/dev/null
-          revision="$(jq -r '.revision' /tmp/run-before.json)"
+          jq -c '{id,state,revision,last_failure_code}' /tmp/run-before.json
+          jq -e '.state == "REVIEW" and .revision == 12 and .last_failure_code == null' /tmp/run-before.json >/dev/null
 
-          autonomous_status="$(curl --silent --show-error --output /tmp/autonomous.json --write-out '%{http_code}' --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" -H 'Content-Type: application/json' -X POST --data "{\"operation_key\":\"w9-s1-p2-v0-23-39-production-acceptance\",\"expected_revision\":${revision}}" "${API_BASE}/v1/engineering-runs/${RUN_ID}/autonomous")"
+          events_before_status="$(curl --silent --show-error --output /tmp/events-before.json --write-out '%{http_code}' --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}/events?after_sequence=0&limit=100")"
+          test "${events_before_status}" = "200"
+          baseline_sequence="$(jq -er '.next_after_sequence' /tmp/events-before.json)"
+          echo "W9-S1 baseline sequence=${baseline_sequence}"
+
+          autonomous_status="$(curl --silent --show-error --output /tmp/autonomous.json --write-out '%{http_code}' --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" -H 'Content-Type: application/json' -X POST --data '{"operation_key":"w9-s1-p2-v0-23-44-production-acceptance","expected_revision":12}' "${API_BASE}/v1/engineering-runs/${RUN_ID}/autonomous")"
           echo "W9-S1 autonomous status=${autonomous_status}"
           jq -c . /tmp/autonomous.json || cat /tmp/autonomous.json
+          test "${autonomous_status}" = "200"
 
-          curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}" > /tmp/run-after.json
-          curl --fail-with-body --silent --show-error --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}/events?after_sequence=15&limit=100" > /tmp/events-after.json
+          run_after_status="$(curl --silent --show-error --output /tmp/run-after.json --write-out '%{http_code}' --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}")"
+          events_after_status="$(curl --silent --show-error --output /tmp/events-after.json --write-out '%{http_code}' --cookie "${cookie_jar}" -H "X-Parallax-Session: 1" "${API_BASE}/v1/engineering-runs/${RUN_ID}/events?after_sequence=${baseline_sequence}&limit=100")"
+          test "${run_after_status}" = "200"
+          test "${events_after_status}" = "200"
 
           echo 'W9-S1 after:'
-          jq -c '{id,state,revision,resume_stage,last_failure_code}' /tmp/run-after.json
+          jq -c '{id,state,revision,last_failure_code}' /tmp/run-after.json
           echo 'W9-S1 new durable events:'
           jq -c '.events[]? | {sequence,event_type,stage,outcome,subsystem,failure_code,source_lineage_ref,evidence_ref,summary,metadata}' /tmp/events-after.json
 
-          for prior_code in TARGET_DISCOVERY_UNBOUNDED PROVIDER_CONFLICT GREENFIELD_BASELINE_MISMATCH SOURCE_NOT_FOUND; do
+          jq -e '.state == "REVIEW" and .revision == 12 and .last_failure_code == null' /tmp/run-after.json >/dev/null
+          jq -e '.stop_reason == "REVIEW_REQUIRED" and .run.state == "REVIEW" and .run.revision == 12' /tmp/autonomous.json >/dev/null
+          jq -e --arg lineage "${REPLACEMENT_LINEAGE}" --arg branch "${EXPECTED_BRANCH}" '
+            .events[]? |
+            select(
+              .event_type == "SOURCE_DELIVERY" and
+              .outcome == "SUCCEEDED" and
+              .source_lineage_ref == $lineage and
+              .metadata.branch_name == $branch and
+              (.metadata.commit_revision | type) == "string" and
+              (.metadata.pull_request_number | type) == "number" and
+              (.metadata.preview_deployment_id | type) == "string" and
+              (.metadata.preview_status == "QUEUED" or .metadata.preview_status == "BUILDING" or .metadata.preview_status == "READY")
+            )
+          ' /tmp/events-after.json >/dev/null
+
+          for prior_code in GREENFIELD_BASELINE_MISMATCH BRANCH_NOT_FOUND SOURCE_MISMATCH BRANCH_CONFLICT PROVIDER_CONFLICT; do
             if grep -q "${prior_code}" /tmp/autonomous.json; then
-              echo "${prior_code} recurred in response" >&2
+              echo "${prior_code} recurred in acceptance response" >&2
               exit 21
             fi
+            if jq -e --arg code "${prior_code}" '.events[]? | select((.metadata.result_code // .failure_code // "") == $code)' /tmp/events-after.json >/dev/null; then
+              echo "${prior_code} recurred in new durable evidence" >&2
+              exit 22
+            fi
           done
-          if jq -e '.events[]? | select((.metadata.result_code // "") == "TARGET_DISCOVERY_UNBOUNDED" or (.metadata.result_code // "") == "PROVIDER_CONFLICT" or (.metadata.result_code // "") == "GREENFIELD_BASELINE_MISMATCH" or (.metadata.result_code // "") == "SOURCE_NOT_FOUND")' /tmp/events-after.json >/dev/null; then
-            echo 'Prior bounded blocker recurred in new durable evidence' >&2
-            exit 22
-          fi
-          test "${autonomous_status}" = "200"
-          jq -e '.stop_reason == "REVIEW_REQUIRED" and .run.state == "REVIEW" and .run.revision == 6' /tmp/autonomous.json >/dev/null
