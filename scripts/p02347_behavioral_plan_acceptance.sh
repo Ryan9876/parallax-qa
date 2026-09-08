@@ -71,7 +71,7 @@ jq -e '
   )
 ' /tmp/p02347-plan-draft.json >/dev/null
 
-computed_digest="$(jq -cS '{schema_version: 1, criteria: .criteria}' /tmp/p02347-plan-draft.json | sha256sum | awk '{print $1}')"
+computed_digest="$(jq -cSj '{schema_version: 1, criteria: .criteria}' /tmp/p02347-plan-draft.json | sha256sum | awk '{print $1}')"
 persisted_digest="$(jq -r '.plan_digest' /tmp/p02347-plan-draft.json)"
 test "${computed_digest}" = "${persisted_digest}"
 
